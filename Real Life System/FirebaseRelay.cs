@@ -18,12 +18,15 @@ namespace Real_Life_System
         private ConcurrentDictionary<string, PlayerData> playersCache = new ConcurrentDictionary<string, PlayerData>();
         private ConcurrentDictionary<string, VehicleData> vehiclesCache = new ConcurrentDictionary<string, VehicleData>();
         private EnvironmentData environmentCache = null;
+        private List<ChatMessage> chatCache = new List<ChatMessage>();
         private DateTime lastPlayerFetch = DateTime.MinValue;
         private DateTime lastVehicleFetch = DateTime.MinValue;
         private DateTime lastEnvironmentFetch = DateTime.MinValue;
-        private int playerFetchInterval = 50;       
-        private int vehicleFetchInterval = 100;     
+        private DateTime lastChatFetch = DateTime.MinValue;
+        private int playerFetchInterval = 50;
+        private int vehicleFetchInterval = 100;
         private int environmentFetchInterval = 10000;
+        private int chatFetchInterval = 500;
         private float interestRadius = 300f;
         private Dictionary<string, PlayerData> lastSentPlayerData = new Dictionary<string, PlayerData>();
         private Dictionary<string, VehicleData> lastSentVehicleData = new Dictionary<string, VehicleData>();
@@ -47,16 +50,16 @@ namespace Real_Life_System
 
         public async Task<string> CreateSession(string hostName, int maxPlayers, string region)
         {
-            currentSessionId = GenerateCompactId(); 
+            currentSessionId = GenerateCompactId();
 
             var sessionData = new Dictionary<string, object>
             {
-                { "h", hostName },           
-                { "p", 1 },                  
-                { "m", maxPlayers },        
-                { "r", region },             
-                { "c", GetTimestamp() },     
-                { "hb", GetTimestamp() }     
+                { "h", hostName },
+                { "p", 1 },
+                { "m", maxPlayers },
+                { "r", region },
+                { "c", GetTimestamp() },
+                { "hb", GetTimestamp() }
             };
 
             try
@@ -74,7 +77,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
                 return null;
             }
         }
@@ -124,7 +127,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
                 return new List<SessionInfo>();
             }
         }
@@ -141,7 +144,7 @@ namespace Real_Life_System
                     .Child(sessionId)
                     .Child("pl")
                     .Child(playerId)
-                    .PutAsync(new { n = playerName, j = GetTimestamp() }); 
+                    .PutAsync(new { n = playerName, j = GetTimestamp() });
 
                 TotalFirebaseCalls++;
 
@@ -167,7 +170,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
                 return false;
             }
         }
@@ -278,7 +281,7 @@ namespace Real_Life_System
                         data.InVehicle == lastData.InVehicle)
                     {
                         CachedResponses++;
-                        return; 
+                        return;
                     }
                 }
 
@@ -288,16 +291,22 @@ namespace Real_Life_System
                     { "x", (short)(data.PosX * 10) },
                     { "y", (short)(data.PosY * 10) },
                     { "z", (short)(data.PosZ * 10) },
-                    { "vx", (sbyte)(data.VelX * 10) },    
+                    { "vx", (sbyte)(data.VelX * 10) },
                     { "vy", (sbyte)(data.VelY * 10) },
                     { "vz", (sbyte)(data.VelZ * 10) },
                     { "h", (byte)(data.Heading / 1.41f) },
-                    { "a", GetAnimByte(data.Animation) },  
-                    { "f", PackFlags(data) },              
-                    { "hp", (byte)(data.Health / 4) },     
+                    { "a", GetAnimByte(data.Animation) },
+                    { "f", PackFlags(data) },
+                    { "hp", (byte)(data.Health / 4) },
                     { "w", (short)data.Weapon },
                     { "t", GetTimestamp() }
                 };
+
+                if (data.InVehicle && !string.IsNullOrEmpty(data.VehicleId))
+                {
+                    compressedData["vid"] = data.VehicleId;
+                    compressedData["seat"] = (sbyte)data.VehicleSeat;
+                }
 
                 pendingUpdates.Enqueue(new PendingUpdate
                 {
@@ -358,6 +367,8 @@ namespace Real_Life_System
                         Animation = data.ContainsKey("a") ? GetAnimString(Convert.ToByte(data["a"])) : "idle",
                         Health = data.ContainsKey("hp") ? Convert.ToByte(data["hp"]) * 4 : 100,
                         Weapon = data.ContainsKey("w") ? Convert.ToInt32(data["w"]) : 0,
+                        VehicleId = data.ContainsKey("vid") ? data["vid"].ToString() : null,
+                        VehicleSeat = data.ContainsKey("seat") ? Convert.ToInt32(data["seat"]) : -1,
                         Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
                     };
 
@@ -602,6 +613,106 @@ namespace Real_Life_System
             }
         }
 
+        public async Task SendChatMessage(string sessionId, string playerId, string playerName, string message)
+        {
+            try
+            {
+                var messageId = GenerateCompactId();
+                var messageData = new Dictionary<string, object>
+                {
+                    { "pid", playerId },
+                    { "pn", playerName.Substring(0, Math.Min(12, playerName.Length)) },
+                    { "msg", message.Substring(0, Math.Min(100, message.Length)) },
+                    { "t", GetTimestamp() }
+                };
+
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("chat")
+                    .Child(messageId)
+                    .PutAsync(messageData);
+
+                TotalFirebaseCalls++;
+            }
+            catch { }
+        }
+
+        public async Task<List<ChatMessage>> GetChatMessages(string sessionId)
+        {
+            var now = DateTime.UtcNow;
+
+            if ((now - lastChatFetch).TotalMilliseconds < chatFetchInterval)
+            {
+                CachedResponses++;
+                return new List<ChatMessage>(chatCache);
+            }
+
+            try
+            {
+                var messages = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("chat")
+                    .OrderByKey()
+                    .LimitToLast(20)
+                    .OnceAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+                lastChatFetch = now;
+
+                var result = new List<ChatMessage>();
+
+                foreach (var msg in messages)
+                {
+                    var data = msg.Object;
+                    if (data == null) continue;
+
+                    var chatMessage = new ChatMessage
+                    {
+                        Id = msg.Key,
+                        PlayerId = data.ContainsKey("pid") ? data["pid"].ToString() : "",
+                        PlayerName = data.ContainsKey("pn") ? data["pn"].ToString() : "Unknown",
+                        Message = data.ContainsKey("msg") ? data["msg"].ToString() : "",
+                        Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
+                    };
+
+                    result.Add(chatMessage);
+                }
+
+                chatCache = result;
+                return result;
+            }
+            catch
+            {
+                return new List<ChatMessage>(chatCache);
+            }
+        }
+
+        public async Task SendDamageEvent(string sessionId, string targetPlayerId, string attackerId, float newHealth)
+        {
+            try
+            {
+                var damageData = new Dictionary<string, object>
+                {
+                    { "aid", attackerId },
+                    { "hp", (byte)(newHealth / 4) },
+                    { "t", GetTimestamp() }
+                };
+
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("p")
+                    .Child(targetPlayerId)
+                    .Child("dmg")
+                    .PutAsync(damageData);
+
+                TotalFirebaseCalls++;
+            }
+            catch { }
+        }
+
         private async void ProcessBatchUpdates()
         {
             if (pendingUpdates.Count == 0) return;
@@ -724,6 +835,7 @@ namespace Real_Life_System
             playersCache.Clear();
             vehiclesCache.Clear();
             environmentCache = null;
+            chatCache.Clear();
             lastSentPlayerData.Clear();
             lastSentVehicleData.Clear();
         }

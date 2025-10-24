@@ -45,6 +45,7 @@
     </Reference>
     <Reference Include="System" />
     <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
     <Reference Include="System.Reactive, Version=6.0.0.0, Culture=neutral, PublicKeyToken=94bc3704cddfc263, processorArchitecture=MSIL">
       <HintPath>..\packages\System.Reactive.6.0.0\lib\net472\System.Reactive.dll</HintPath>
     </Reference>
@@ -65,6 +66,12 @@
     <Reference Include="WindowsBase" />
   </ItemGroup>
   <ItemGroup>
+    <Compile Include="ChatCommand.cs" />
+    <Compile Include="ChatDisplayMessage.cs" />
+    <Compile Include="ChatMessage.cs" />
+    <Compile Include="ChatMessageType.cs" />
+    <Compile Include="ChatSystem.cs" />
+    <Compile Include="ConnectionState.cs" />
     <Compile Include="CoopScript.cs" />
     <Compile Include="EnvironmentData.cs" />
     <Compile Include="FirebaseRelay.cs" />

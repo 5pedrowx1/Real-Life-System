@@ -9,6 +9,8 @@
         public string Animation;
         public bool IsAlive;
         public bool InVehicle;
+        public string VehicleId;      
+        public int VehicleSeat;      
         public float Health;
         public int Weapon;
         public long Timestamp;

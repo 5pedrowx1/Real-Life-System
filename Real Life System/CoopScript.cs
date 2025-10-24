@@ -1,52 +1,44 @@
 ﻿using GTA;
 using GTA.Chrono;
 using GTA.Math;
+using GTA.Native;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Windows.Forms;
 
 namespace Real_Life_System
 {
     public class CoopScript : Script
     {
         FirebaseRelay firebase;
+        ChatSystem chatSystem;
         string myPlayerId;
         string myPlayerName;
         string myRegion = "EU";
         string mySessionId;
-
-        enum ConnectionState
-        {
-            Disconnected,
-            SearchingSessions,
-            Connected,
-            Hosting
-        }
         ConnectionState connectionState = ConnectionState.Disconnected;
-
         List<SessionInfo> cachedSessions = new List<SessionInfo>();
         ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
         ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
-
         Vector3 lastPos;
         float lastHeading;
         WeaponHash lastWeapon;
         bool lastInVehicle;
         Weather lastWeather = Weather.Clear;
         int lastHour = 12;
-
         DateTime lastPlayerSync = DateTime.MinValue;
         DateTime lastVehicleSync = DateTime.MinValue;
         DateTime lastEnvironmentSync = DateTime.MinValue;
         DateTime lastDataFetch = DateTime.MinValue;
         DateTime lastStatsDisplay = DateTime.MinValue;
-
+        DateTime lastChatFetch = DateTime.MinValue;
+        DateTime lastDamageCheck = DateTime.MinValue;
         float playerSpeed = 0f;
         int adaptivePlayerSyncRate = 50;
         int adaptiveVehicleSyncRate = 100;
-
         int frameCount = 0;
         DateTime lastFpsCheck = DateTime.UtcNow;
         float currentFps = 0;
@@ -60,10 +52,12 @@ namespace Real_Life_System
 
                 Tick += OnTick;
                 KeyDown += OnKeyDown;
+                KeyUp += OnKeyUp;
                 Aborted += OnAborted;
 
                 string firebaseUrl = "https://gta-coop-mod-default-rtdb.europe-west1.firebasedatabase.app/";
                 firebase = new FirebaseRelay(firebaseUrl);
+                chatSystem = new ChatSystem(); 
 
                 firebase.SetMyPlayerId(myPlayerId);
 
@@ -74,8 +68,7 @@ namespace Real_Life_System
                 );
 
                 firebase.SetInterestRadius(300f);
-
-                GTA.UI.Notification.PostTicker("[MP] Mod carregado!", true);
+                chatSystem.AddSystemMessage("Pressione T para abrir o chat");
 
                 StartAutoConnect();
             }
@@ -93,34 +86,49 @@ namespace Real_Life_System
 
                 await RefreshSessions();
 
-                GTA.UI.Notification.PostTicker("[MP] Controles:", true);
-                GTA.UI.Notification.PostTicker("  F8  = Stats", true);
-                GTA.UI.Notification.PostTicker("  F9  = Criar Sessão", true);
-                GTA.UI.Notification.PostTicker("  F10 = Listar Sessões", true);
-                GTA.UI.Notification.PostTicker("  F11 = Conectar", true);
+                chatSystem.AddSystemMessage("Controles:");
+                chatSystem.AddSystemMessage("F8=Stats | F9=Criar | F10=Listar | F11=Conectar");
 
                 await Task.Delay(3000);
 
                 if (connectionState == ConnectionState.SearchingSessions)
                 {
                     var bestSession = cachedSessions
-                        .Where(s => s.PlayerCount < s.MaxPlayers)
+                        .Where(s => s.PlayerCount < s.MaxPlayers && s.PlayerCount > 0)
                         .OrderByDescending(s => s.PlayerCount)
+                        .ThenBy(s => s.SessionId)
                         .FirstOrDefault();
 
                     if (bestSession != null)
                     {
+                        chatSystem.AddSystemMessage($"Entrando na sessão de {bestSession.HostName}...");
                         await JoinSession(bestSession.SessionId);
                     }
                     else
                     {
-                        await CreateSession();
+                        var anySessions = cachedSessions.Any();
+
+                        if (anySessions)
+                        {
+                            chatSystem.AddSystemMessage("Todas as sessões estão cheias");
+                            var anySession = cachedSessions.FirstOrDefault();
+                            if (anySession != null)
+                            {
+                                await JoinSession(anySession.SessionId);
+                            }
+                        }
+                        else
+                        {
+                            chatSystem.AddSystemMessage("Criando nova sessão...");
+                            await CreateSession();
+                        }
                     }
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[MP] AutoConnect: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"AutoConnect: {ex.Message}");
+                connectionState = ConnectionState.Disconnected;
             }
         }
 
@@ -132,20 +140,20 @@ namespace Real_Life_System
 
                 if (cachedSessions.Count == 0)
                 {
-                    GTA.UI.Notification.PostTicker("[FB] Nenhuma sessão online", true);
+                    chatSystem.AddSystemMessage("Nenhuma sessão online");
                 }
                 else
                 {
-                    GTA.UI.Notification.PostTicker($"[FB] {cachedSessions.Count} sessão(ões)", true);
+                    chatSystem.AddSystemMessage($"{cachedSessions.Count} sessão(ões) encontrada(s)");
                     foreach (var session in cachedSessions.Take(3))
                     {
-                        GTA.UI.Notification.PostTicker($"{session.HostName} ({session.PlayerCount}/{session.MaxPlayers})", true);
+                        chatSystem.AddSystemMessage($"→ {session.HostName} ({session.PlayerCount}/{session.MaxPlayers})");
                     }
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"Refresh: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"Refresh: {ex.Message}");
             }
         }
 
@@ -158,18 +166,18 @@ namespace Real_Life_System
                 if (mySessionId != null)
                 {
                     connectionState = ConnectionState.Hosting;
-                    GTA.UI.Notification.PostTicker("[MP] SESSÃO CRIADA!", true);
-                    GTA.UI.Notification.PostTicker($"Host: {myPlayerName}", true);
+                    chatSystem.AddSystemMessage("SESSÃO CRIADA!");
+                    chatSystem.AddSystemMessage($"Host: {myPlayerName}");
                     await firebase.JoinSession(mySessionId, myPlayerId, myPlayerName);
                 }
                 else
                 {
-                    GTA.UI.Notification.PostTicker("[FB] Erro ao criar sessão", true);
+                    chatSystem.AddErrorMessage("Erro ao criar sessão");
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"Create: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"Create: {ex.Message}");
             }
         }
 
@@ -182,7 +190,14 @@ namespace Real_Life_System
                 var session = cachedSessions.FirstOrDefault(s => s.SessionId == sessionId);
                 if (session != null)
                 {
-                    GTA.UI.Notification.PostTicker($"[MP] Conectando a {session.HostName}...", true);
+                    if (session.PlayerCount >= session.MaxPlayers)
+                    {
+                        chatSystem.AddErrorMessage($"Sessão de {session.HostName} está cheia!");
+                        connectionState = ConnectionState.Disconnected;
+                        return;
+                    }
+
+                    chatSystem.AddSystemMessage($"Conectando a {session.HostName}...");
                 }
 
                 bool success = await firebase.JoinSession(sessionId, myPlayerId, myPlayerName);
@@ -190,17 +205,19 @@ namespace Real_Life_System
                 if (success)
                 {
                     connectionState = ConnectionState.Connected;
-                    GTA.UI.Notification.PostTicker("[MP] Conectado!", true);
+                    chatSystem.AddSystemMessage("CONECTADO!");
+                    chatSystem.AddSystemMessage("Bem-vindo ao servidor");
+                    chatSystem.AddSystemMessage("Digite /help para comandos");
                 }
                 else
                 {
-                    GTA.UI.Notification.PostTicker("[MP] Falha ao conectar", true);
+                    chatSystem.AddErrorMessage("Falha ao conectar");
                     connectionState = ConnectionState.Disconnected;
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"Join: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"Join: {ex.Message}");
                 connectionState = ConnectionState.Disconnected;
             }
         }
@@ -209,6 +226,8 @@ namespace Real_Life_System
         {
             try
             {
+                chatSystem.Draw();
+
                 if (connectionState != ConnectionState.Connected && connectionState != ConnectionState.Hosting)
                     return;
 
@@ -278,6 +297,18 @@ namespace Real_Life_System
                     lastDataFetch = now;
                 }
 
+                if ((now - lastChatFetch).TotalMilliseconds > 500)
+                {
+                    FetchChatMessages();
+                    lastChatFetch = now;
+                }
+
+                if ((now - lastDamageCheck).TotalMilliseconds > 100)
+                {
+                    CheckDamageDealt();
+                    lastDamageCheck = now;
+                }
+
                 if ((now - lastStatsDisplay).TotalSeconds > 30)
                 {
                     ShowStats();
@@ -287,10 +318,11 @@ namespace Real_Life_System
                 UpdateRemotePlayers();
                 UpdateRemoteVehicles();
                 CleanupStaleEntities();
+                ApplyCollisionToRemotePlayers();
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"Tick Error: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"Tick: {ex.Message}");
             }
         }
 
@@ -312,6 +344,23 @@ namespace Real_Life_System
                 else if (player.IsShooting) anim = "shooting";
                 else if (player.IsRagdoll) anim = "ragdoll";
 
+                string vehicleId = null;
+                int vehicleSeat = -1;
+
+                if (inVehicle && player.CurrentVehicle != null && player.CurrentVehicle.Exists())
+                {
+                    vehicleId = player.CurrentVehicle.Handle.ToString();
+
+                    if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.Driver) == player)
+                        vehicleSeat = -1;
+                    else if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.Passenger) == player)
+                        vehicleSeat = 0;
+                    else if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.LeftRear) == player)
+                        vehicleSeat = 1;
+                    else if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.RightRear) == player)
+                        vehicleSeat = 2;
+                }
+
                 var data = new PlayerData
                 {
                     Name = myPlayerName,
@@ -325,6 +374,8 @@ namespace Real_Life_System
                     Animation = anim,
                     IsAlive = player.IsAlive,
                     InVehicle = inVehicle,
+                    VehicleId = vehicleId,
+                    VehicleSeat = vehicleSeat,
                     Health = player.Health,
                     Weapon = (int)weapon,
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
@@ -412,6 +463,8 @@ namespace Real_Life_System
                     player.Animation = data.Animation;
                     player.IsAlive = data.IsAlive;
                     player.InVehicle = data.InVehicle;
+                    player.VehicleId = data.VehicleId;
+                    player.Seat = data.VehicleSeat;
                     player.Health = data.Health;
                     player.CurrentWeapon = (WeaponHash)data.Weapon;
                     player.LastUpdate = DateTime.UtcNow;
@@ -421,11 +474,11 @@ namespace Real_Life_System
                         player.Ped = World.CreatePed(PedHash.FreemodeMale01, player.TargetPos);
                         if (player.Ped != null && player.Ped.Exists())
                         {
-                            player.Ped.IsInvincible = true;
+                            player.Ped.IsInvincible = false;
                             player.Ped.BlockPermanentEvents = true;
-                            player.Ped.CanRagdoll = false;
+                            player.Ped.CanRagdoll = true;
 
-                            GTA.UI.Notification.PostTicker($"👤 {player.Name} entrou!", true);
+                            chatSystem.AddSystemMessage($"{player.Name} entrou no servidor");
                         }
                     }
                 }
@@ -450,7 +503,7 @@ namespace Real_Life_System
                         vehicle.Vehicle = World.CreateVehicle(vehicle.Model, vehicle.TargetPos);
                         if (vehicle.Vehicle != null && vehicle.Vehicle.Exists())
                         {
-                            vehicle.Vehicle.IsInvincible = true;
+                            vehicle.Vehicle.IsInvincible = false;
                         }
                     }
                 }
@@ -482,9 +535,36 @@ namespace Real_Life_System
 
                     float lerpFactor = playerSpeed > 20f ? 0.5f : 0.3f;
 
-                    player.Ped.Position = Vector3.Lerp(player.Ped.Position, player.TargetPos, lerpFactor);
-                    player.Ped.Heading = Lerp(player.Ped.Heading, player.TargetHeading, lerpFactor);
-                    player.Ped.Velocity = player.TargetVel;
+                    if (player.InVehicle && !string.IsNullOrEmpty(player.VehicleId))
+                    {
+                        var vehicleKvp = remoteVehicles.FirstOrDefault(v => v.Key.Contains(player.VehicleId));
+                        if (vehicleKvp.Value != null && vehicleKvp.Value.Vehicle != null && vehicleKvp.Value.Vehicle.Exists())
+                        {
+                            var veh = vehicleKvp.Value.Vehicle;
+
+                            VehicleSeat seat = VehicleSeat.Driver;
+                            if (player.Seat == -1) seat = VehicleSeat.Driver;
+                            else if (player.Seat == 0) seat = VehicleSeat.Passenger;
+                            else if (player.Seat == 1) seat = VehicleSeat.LeftRear;
+                            else if (player.Seat == 2) seat = VehicleSeat.RightRear;
+
+                            if (!player.Ped.IsInVehicle() || player.Ped.CurrentVehicle != veh)
+                            {
+                                player.Ped.SetIntoVehicle(veh, seat);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (player.Ped.IsInVehicle())
+                        {
+                            player.Ped.Task.LeaveVehicle();
+                        }
+
+                        player.Ped.Position = Vector3.Lerp(player.Ped.Position, player.TargetPos, lerpFactor);
+                        player.Ped.Heading = Lerp(player.Ped.Heading, player.TargetHeading, lerpFactor);
+                        player.Ped.Velocity = player.TargetVel;
+                    }
 
                     if (player.CurrentWeapon != WeaponHash.Unarmed)
                     {
@@ -494,6 +574,10 @@ namespace Real_Life_System
                     if (player.Health > 0)
                     {
                         player.Ped.Health = (int)player.Health;
+                    }
+                    else if (player.Ped.IsAlive)
+                    {
+                        player.Ped.Kill();
                     }
                 }
             }
@@ -527,6 +611,98 @@ namespace Real_Life_System
             }
         }
 
+        void ApplyCollisionToRemotePlayers()
+        {
+            try
+            {
+                foreach (var kv in remotePlayers)
+                {
+                    var player = kv.Value;
+                    if (player.Ped == null || !player.Ped.Exists()) continue;
+
+                    Function.Call(Hash.SET_ENTITY_COLLISION, player.Ped.Handle, true, true);
+                }
+            }
+            catch
+            {
+                // Silently fail
+            }
+        }
+
+        void CheckDamageDealt()
+        {
+            try
+            {
+                var player = Game.Player.Character;
+                if (player == null || !player.Exists()) return;
+
+                foreach (var kv in remotePlayers)
+                {
+                    var remotePlayer = kv.Value;
+                    if (remotePlayer.Ped == null || !remotePlayer.Ped.Exists()) continue;
+
+                    if (remotePlayer.Ped.HasBeenDamagedBy(player))
+                    {
+                        float currentHealth = remotePlayer.Ped.Health;
+
+                        Task.Run(async () =>
+                        {
+                            await firebase.SendDamageEvent(mySessionId, kv.Key, myPlayerId, currentHealth);
+                        });
+
+                        remotePlayer.Ped.ClearLastWeaponDamage();
+                    }
+                }
+            }
+            catch
+            {
+                // Silently fail
+            }
+        }
+
+        async void FetchChatMessages()
+        {
+            if (string.IsNullOrEmpty(mySessionId)) return;
+
+            try
+            {
+                var messages = await firebase.GetChatMessages(mySessionId);
+
+                foreach (var msg in messages)
+                {
+                    if (chatSystem.IsMessageDisplayed(msg.Id))
+                        continue;
+
+                    chatSystem.AddMessage(msg.PlayerName, msg.Message, ChatMessageType.Normal);
+                    chatSystem.MarkMessageAsDisplayed(msg.Id);
+                }
+            }
+            catch
+            {
+                // Silently fail
+            }
+        }
+
+        async void SendChatMessage(string message)
+        {
+            if (string.IsNullOrEmpty(message) || string.IsNullOrEmpty(mySessionId)) return;
+
+            try
+            {
+                var cmd = chatSystem.ProcessCommand(message, myPlayerName);
+
+                if (cmd != null)
+                {
+                    await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, message);
+                    chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
+                }
+            }
+            catch (Exception ex)
+            {
+                chatSystem.AddErrorMessage($"Erro ao enviar: {ex.Message}");
+            }
+        }
+
         void CleanupStaleEntities()
         {
             try
@@ -538,7 +714,7 @@ namespace Real_Life_System
                     if (kv.Value.Ped != null && kv.Value.Ped.Exists())
                         kv.Value.Ped.Delete();
                     remotePlayers.TryRemove(kv.Key, out _);
-                    GTA.UI.Notification.PostTicker($"{kv.Value.Name} saiu", true);
+                    chatSystem.AddSystemMessage($"{kv.Value.Name} saiu do servidor");
                 }
 
                 foreach (var kv in remoteVehicles.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
@@ -559,8 +735,8 @@ namespace Real_Life_System
             try
             {
                 var stats = firebase.GetStats();
-                GTA.UI.Notification.PostTicker($"{stats}", true);
-                GTA.UI.Notification.PostTicker($"Players: {remotePlayers.Count} | FPS: {currentFps:F0}", true);
+                chatSystem.AddSystemMessage(stats);
+                chatSystem.AddSystemMessage($"Jogadores: {remotePlayers.Count} | FPS: {currentFps:F0}");
             }
             catch
             {
@@ -568,28 +744,59 @@ namespace Real_Life_System
             }
         }
 
-        async void OnKeyDown(object s, System.Windows.Forms.KeyEventArgs e)
+        void OnKeyDown(object s, KeyEventArgs e)
         {
             try
             {
-                if (e.KeyCode == System.Windows.Forms.Keys.F8)
+                // Chat está ativo - capturar input
+                if (chatSystem.IsActive)
+                {
+                    if (e.KeyCode == Keys.Enter)
+                    {
+                        string input = chatSystem.GetInputAndClear();
+                        if (!string.IsNullOrEmpty(input))
+                        {
+                            SendChatMessage(input);
+                        }
+                        chatSystem.Deactivate();
+                        e.SuppressKeyPress = true;
+                    }
+                    else if (e.KeyCode == Keys.Escape)
+                    {
+                        chatSystem.Deactivate();
+                        e.SuppressKeyPress = true;
+                    }
+                    else if (e.KeyCode == Keys.Back)
+                    {
+                        chatSystem.RemoveCharacter();
+                        e.SuppressKeyPress = true;
+                    }
+                    return;
+                }
+
+                if (e.KeyCode == Keys.T)
+                {
+                    chatSystem.Activate();
+                    e.SuppressKeyPress = true;
+                }
+                else if (e.KeyCode == Keys.F8)
                 {
                     ShowStats();
                 }
-                else if (e.KeyCode == System.Windows.Forms.Keys.F9)
+                else if (e.KeyCode == Keys.F9)
                 {
                     if (connectionState == ConnectionState.Hosting)
                     {
-                        GTA.UI.Notification.PostTicker("Já hospedando!", true);
+                        chatSystem.AddSystemMessage("Já está hospedando uma sessão!");
                         return;
                     }
-                    await CreateSession();
+                    Task.Run(async () => await CreateSession());
                 }
-                else if (e.KeyCode == System.Windows.Forms.Keys.F10)
+                else if (e.KeyCode == Keys.F10)
                 {
-                    await RefreshSessions();
+                    Task.Run(async () => await RefreshSessions());
                 }
-                else if (e.KeyCode == System.Windows.Forms.Keys.F11)
+                else if (e.KeyCode == Keys.F11)
                 {
                     var bestSession = cachedSessions
                         .Where(session => session.PlayerCount < session.MaxPlayers)
@@ -597,22 +804,63 @@ namespace Real_Life_System
                         .FirstOrDefault();
 
                     if (bestSession != null)
-                        await JoinSession(bestSession.SessionId);
+                        Task.Run(async () => await JoinSession(bestSession.SessionId));
                     else
-                        GTA.UI.Notification.PostTicker("Nenhuma sessão!", true);
+                        chatSystem.AddSystemMessage("Nenhuma sessão disponível!");
                 }
-                else if (e.KeyCode == System.Windows.Forms.Keys.F12)
+                else if (e.KeyCode == Keys.F12)
                 {
-                    await RefreshSessions();
+                    Task.Run(async () => await RefreshSessions());
                 }
-                else if (e.KeyCode == System.Windows.Forms.Keys.F7)
+                else if (e.KeyCode == Keys.F7)
                 {
                     firebase.ClearCache();
+                    chatSystem.AddSystemMessage("Cache limpo");
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"KeyDown: {ex.Message}", true);
+                chatSystem.AddErrorMessage($"KeyDown: {ex.Message}");
+            }
+        }
+
+        void OnKeyUp(object s, KeyEventArgs e)
+        {
+            try
+            {
+                if (chatSystem.IsActive)
+                {
+                    if ((e.KeyCode >= Keys.A && e.KeyCode <= Keys.Z) ||
+                        (e.KeyCode >= Keys.D0 && e.KeyCode <= Keys.D9))
+                    {
+                        char c = e.KeyCode.ToString()[0];
+                        if (!e.Shift)
+                            c = char.ToLower(c);
+                        chatSystem.AddCharacter(c);
+                    }
+                    else if (e.KeyCode == Keys.Space)
+                    {
+                        chatSystem.AddCharacter(' ');
+                    }
+                    else if (e.KeyCode == Keys.OemPeriod)
+                        chatSystem.AddCharacter('.');
+                    else if (e.KeyCode == Keys.Oemcomma)
+                        chatSystem.AddCharacter(',');
+                    else if (e.KeyCode == Keys.OemQuestion)
+                        chatSystem.AddCharacter(e.Shift ? '?' : '/');
+                    else if (e.KeyCode == Keys.OemSemicolon)
+                        chatSystem.AddCharacter(e.Shift ? ':' : ';');
+                    else if (e.KeyCode == Keys.OemQuotes)
+                        chatSystem.AddCharacter(e.Shift ? '"' : '\'');
+                    else if (e.KeyCode == Keys.D1 && e.Shift)
+                        chatSystem.AddCharacter('!');
+                    else if (e.KeyCode == Keys.D8 && e.Shift)
+                        chatSystem.AddCharacter('*');
+                }
+            }
+            catch
+            {
+                // Silently fail
             }
         }
 
@@ -620,7 +868,7 @@ namespace Real_Life_System
         {
             try
             {
-                GTA.UI.Notification.PostTicker("[MP] Desconectando...", true);
+                chatSystem.AddSystemMessage("Desconectando...");
 
                 if (!string.IsNullOrEmpty(mySessionId))
                 {
@@ -647,7 +895,7 @@ namespace Real_Life_System
                         vehicle.Vehicle.Delete();
                 }
 
-                GTA.UI.Notification.PostTicker($"{firebase.GetStats()}", true);
+                chatSystem.AddSystemMessage(firebase.GetStats());
             }
             catch
             {
