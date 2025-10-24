@@ -9,87 +9,72 @@ using System.Threading.Tasks;
 
 namespace Real_Life_System
 {
-    /// <summary>
-    /// Firebase Relay OTIMIZADO com Cache Local
-    /// - Reduz chamadas ao Firebase em ~80%
-    /// - Usa delta compression
-    /// - Interest management (só sincroniza próximos)
-    /// - Adaptive sync rate
-    /// </summary>
     public class FirebaseRelay
     {
         private FirebaseClient firebase;
         private Timer heartbeatTimer;
         private string currentSessionId;
-
-        // ============================================================================
-        // CACHE LOCAL - Reduz chamadas ao Firebase
-        // ============================================================================
+        private string myPlayerId;
         private ConcurrentDictionary<string, PlayerData> playersCache = new ConcurrentDictionary<string, PlayerData>();
         private ConcurrentDictionary<string, VehicleData> vehiclesCache = new ConcurrentDictionary<string, VehicleData>();
         private EnvironmentData environmentCache = null;
-
         private DateTime lastPlayerFetch = DateTime.MinValue;
         private DateTime lastVehicleFetch = DateTime.MinValue;
         private DateTime lastEnvironmentFetch = DateTime.MinValue;
-
-        // Configurações de otimização
-        private int playerFetchInterval = 200;      // 200ms = 5x/segundo
-        private int vehicleFetchInterval = 250;     // 250ms = 4x/segundo
-        private int environmentFetchInterval = 5000; // 5s = 1x/5segundos
-
-        private float interestRadius = 500f; // Só sincronizar jogadores a 500m
-
-        // Delta compression - só envia se mudou significativamente
+        private int playerFetchInterval = 50;       
+        private int vehicleFetchInterval = 100;     
+        private int environmentFetchInterval = 10000;
+        private float interestRadius = 300f;
         private Dictionary<string, PlayerData> lastSentPlayerData = new Dictionary<string, PlayerData>();
         private Dictionary<string, VehicleData> lastSentVehicleData = new Dictionary<string, VehicleData>();
-
-        // Estatísticas
         public int TotalFirebaseCalls = 0;
         public int CachedResponses = 0;
+        public int SelfSyncBlocked = 0;
         public long TotalBytesSent = 0;
+        private Queue<PendingUpdate> pendingUpdates = new Queue<PendingUpdate>();
+        private Timer batchTimer;
 
         public FirebaseRelay(string firebaseUrl)
         {
             firebase = new FirebaseClient(firebaseUrl);
+            batchTimer = new Timer(_ => ProcessBatchUpdates(), null, 33, 33);
         }
 
-        // ============================================================================
-        // SESSÕES
-        // ============================================================================
+        public void SetMyPlayerId(string playerId)
+        {
+            myPlayerId = playerId;
+        }
 
         public async Task<string> CreateSession(string hostName, int maxPlayers, string region)
         {
-            currentSessionId = Guid.NewGuid().ToString();
+            currentSessionId = GenerateCompactId(); 
 
             var sessionData = new Dictionary<string, object>
             {
-                { "hostName", hostName },
-                { "players", 1 },
-                { "maxPlayers", maxPlayers },
-                { "region", region },
-                { "created", DateTimeOffset.UtcNow.ToUnixTimeSeconds() },
-                { "lastHeartbeat", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+                { "h", hostName },           
+                { "p", 1 },                  
+                { "m", maxPlayers },        
+                { "r", region },             
+                { "c", GetTimestamp() },     
+                { "hb", GetTimestamp() }     
             };
 
             try
             {
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(currentSessionId)
                     .PutAsync(sessionData);
 
                 TotalFirebaseCalls++;
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 10000, 10000);
 
-                // Heartbeat otimizado - apenas timestamp
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 5000);
-
-                GTA.UI.Notification.PostTicker($"[Firebase] Sessão criada: {currentSessionId.Substring(0, 8)}", true);
+                GTA.UI.Notification.PostTicker($"[FB] Sessão: {currentSessionId.Substring(0, 6)}", true);
                 return currentSessionId;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[Firebase] Erro: {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
                 return null;
             }
         }
@@ -99,12 +84,12 @@ namespace Real_Life_System
             try
             {
                 var sessions = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .OnceAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
 
-                var currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var currentTime = GetTimestamp();
                 var result = new List<SessionInfo>();
 
                 foreach (var session in sessions)
@@ -112,24 +97,24 @@ namespace Real_Life_System
                     var data = session.Object;
                     if (data == null) continue;
 
-                    if (data.ContainsKey("lastHeartbeat"))
+                    if (data.ContainsKey("hb"))
                     {
-                        var heartbeat = Convert.ToInt64(data["lastHeartbeat"]);
-                        if (currentTime - heartbeat > 15) continue;
+                        var heartbeat = Convert.ToInt64(data["hb"]);
+                        if (currentTime - heartbeat > 30) continue;
                     }
 
-                    if (region != null && data.ContainsKey("region"))
+                    if (region != null && data.ContainsKey("r"))
                     {
-                        if (data["region"].ToString() != region) continue;
+                        if (data["r"].ToString() != region) continue;
                     }
 
                     var sessionInfo = new SessionInfo
                     {
                         SessionId = session.Key,
-                        HostName = data.ContainsKey("hostName") ? data["hostName"].ToString() : "Unknown",
-                        PlayerCount = data.ContainsKey("players") ? Convert.ToInt32(data["players"]) : 0,
-                        MaxPlayers = data.ContainsKey("maxPlayers") ? Convert.ToInt32(data["maxPlayers"]) : 8,
-                        Region = data.ContainsKey("region") ? data["region"].ToString() : "Unknown"
+                        HostName = data.ContainsKey("h") ? data["h"].ToString() : "Unknown",
+                        PlayerCount = data.ContainsKey("p") ? Convert.ToInt32(data["p"]) : 0,
+                        MaxPlayers = data.ContainsKey("m") ? Convert.ToInt32(data["m"]) : 8,
+                        Region = data.ContainsKey("r") ? data["r"].ToString() : "?"
                     };
 
                     result.Add(sessionInfo);
@@ -139,7 +124,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[Firebase] Erro: {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
                 return new List<SessionInfo>();
             }
         }
@@ -149,39 +134,40 @@ namespace Real_Life_System
             try
             {
                 currentSessionId = sessionId;
+                myPlayerId = playerId;
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("playersList")
+                    .Child("pl")
                     .Child(playerId)
-                    .PutAsync(new { name = playerName, joined = DateTimeOffset.UtcNow.ToUnixTimeSeconds() });
+                    .PutAsync(new { n = playerName, j = GetTimestamp() }); 
 
                 TotalFirebaseCalls++;
 
                 var players = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("playersList")
+                    .Child("pl")
                     .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("players")
+                    .Child("p")
                     .PutAsync(players.Count);
 
                 TotalFirebaseCalls++;
 
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 5000);
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 10000, 10000);
 
                 return true;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[Firebase] Erro ao entrar: {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] ❌ {ex.Message}", true);
                 return false;
             }
         }
@@ -191,27 +177,28 @@ namespace Real_Life_System
             try
             {
                 heartbeatTimer?.Dispose();
+                batchTimer?.Dispose();
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("playersList")
+                    .Child("pl")
                     .Child(playerId)
                     .DeleteAsync();
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("players")
+                    .Child("p")
                     .Child(playerId)
                     .DeleteAsync();
 
                 TotalFirebaseCalls += 2;
 
                 var players = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("playersList")
+                    .Child("pl")
                     .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
@@ -219,9 +206,9 @@ namespace Real_Life_System
                 if (players.Count > 0)
                 {
                     await firebase
-                        .Child("sessions")
+                        .Child("s")
                         .Child(sessionId)
-                        .Child("players")
+                        .Child("p")
                         .PutAsync(players.Count);
 
                     TotalFirebaseCalls++;
@@ -235,9 +222,10 @@ namespace Real_Life_System
             try
             {
                 heartbeatTimer?.Dispose();
+                batchTimer?.Dispose();
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
                     .DeleteAsync();
 
@@ -253,30 +241,30 @@ namespace Real_Life_System
             try
             {
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(currentSessionId)
-                    .Child("lastHeartbeat")
-                    .PutAsync(DateTimeOffset.UtcNow.ToUnixTimeSeconds());
+                    .Child("hb")
+                    .PutAsync(GetTimestamp());
 
                 TotalFirebaseCalls++;
             }
             catch { }
         }
 
-        // ============================================================================
-        // JOGADORES - COM CACHE E DELTA COMPRESSION
-        // ============================================================================
-
         public async Task UpdatePlayerData(string sessionId, string playerId, PlayerData data)
         {
+            if (playerId == myPlayerId)
+            {
+                SelfSyncBlocked++;
+                return;
+            }
+
             try
             {
-                // DELTA COMPRESSION: Só envia se mudou significativamente
                 if (lastSentPlayerData.ContainsKey(playerId))
                 {
                     var lastData = lastSentPlayerData[playerId];
 
-                    // Calcular distância movida
                     float deltaPos = (float)Math.Sqrt(
                         Math.Pow(data.PosX - lastData.PosX, 2) +
                         Math.Pow(data.PosY - lastData.PosY, 2) +
@@ -285,46 +273,38 @@ namespace Real_Life_System
 
                     float deltaHeading = Math.Abs(data.Heading - lastData.Heading);
 
-                    // Só envia se mudou > 0.3m OU > 5 graus OU mudou animação
-                    if (deltaPos < 0.3f && deltaHeading < 5f &&
+                    if (deltaPos < 0.2f && deltaHeading < 3f &&
                         data.Animation == lastData.Animation &&
                         data.InVehicle == lastData.InVehicle)
                     {
                         CachedResponses++;
-                        return; // SKIP - economia de bandwidth!
+                        return; 
                     }
                 }
 
-                // Comprimir dados usando shorts (2 bytes) em vez de floats (4 bytes)
                 var compressedData = new Dictionary<string, object>
                 {
-                    { "n", data.Name },                          // Nome
-                    { "x", (short)(data.PosX * 10) },           // Posição X (1 decimal)
-                    { "y", (short)(data.PosY * 10) },           // Posição Y
-                    { "z", (short)(data.PosZ * 10) },           // Posição Z
-                    { "vx", (short)(data.VelX * 100) },         // Velocidade X (2 decimais)
-                    { "vy", (short)(data.VelY * 100) },         // Velocidade Y
-                    { "vz", (short)(data.VelZ * 100) },         // Velocidade Z
-                    { "h", (short)data.Heading },               // Heading (inteiro)
-                    { "a", data.Animation },                    // Animação
-                    { "al", data.IsAlive ? 1 : 0 },            // Alive (bit)
-                    { "iv", data.InVehicle ? 1 : 0 },          // InVehicle (bit)
-                    { "hp", (short)data.Health },               // Health
-                    { "w", data.Weapon },                       // Weapon
-                    { "t", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+                    { "n", data.Name.Substring(0, Math.Min(12, data.Name.Length)) },
+                    { "x", (short)(data.PosX * 10) },
+                    { "y", (short)(data.PosY * 10) },
+                    { "z", (short)(data.PosZ * 10) },
+                    { "vx", (sbyte)(data.VelX * 10) },    
+                    { "vy", (sbyte)(data.VelY * 10) },
+                    { "vz", (sbyte)(data.VelZ * 10) },
+                    { "h", (byte)(data.Heading / 1.41f) },
+                    { "a", GetAnimByte(data.Animation) },  
+                    { "f", PackFlags(data) },              
+                    { "hp", (byte)(data.Health / 4) },     
+                    { "w", (short)data.Weapon },
+                    { "t", GetTimestamp() }
                 };
 
-                await firebase
-                    .Child("sessions")
-                    .Child(sessionId)
-                    .Child("players")
-                    .Child(playerId)
-                    .PutAsync(compressedData);
+                pendingUpdates.Enqueue(new PendingUpdate
+                {
+                    Path = $"s/{sessionId}/p/{playerId}",
+                    Data = compressedData
+                });
 
-                TotalFirebaseCalls++;
-                TotalBytesSent += EstimateDataSize(compressedData);
-
-                // Atualizar cache
                 lastSentPlayerData[playerId] = data;
                 playersCache[playerId] = data;
             }
@@ -335,7 +315,6 @@ namespace Real_Life_System
         {
             var now = DateTime.UtcNow;
 
-            // USAR CACHE se ainda não passou o intervalo
             if ((now - lastPlayerFetch).TotalMilliseconds < playerFetchInterval)
             {
                 CachedResponses++;
@@ -345,9 +324,9 @@ namespace Real_Life_System
             try
             {
                 var players = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("players")
+                    .Child("p")
                     .OnceAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
@@ -357,6 +336,12 @@ namespace Real_Life_System
 
                 foreach (var player in players)
                 {
+                    if (player.Key == myPlayerId)
+                    {
+                        SelfSyncBlocked++;
+                        continue;
+                    }
+
                     var data = player.Object;
                     if (data == null) continue;
 
@@ -366,19 +351,21 @@ namespace Real_Life_System
                         PosX = data.ContainsKey("x") ? Convert.ToInt16(data["x"]) / 10f : 0,
                         PosY = data.ContainsKey("y") ? Convert.ToInt16(data["y"]) / 10f : 0,
                         PosZ = data.ContainsKey("z") ? Convert.ToInt16(data["z"]) / 10f : 0,
-                        VelX = data.ContainsKey("vx") ? Convert.ToInt16(data["vx"]) / 100f : 0,
-                        VelY = data.ContainsKey("vy") ? Convert.ToInt16(data["vy"]) / 100f : 0,
-                        VelZ = data.ContainsKey("vz") ? Convert.ToInt16(data["vz"]) / 100f : 0,
-                        Heading = data.ContainsKey("h") ? Convert.ToInt16(data["h"]) : 0,
-                        Animation = data.ContainsKey("a") ? data["a"].ToString() : "idle",
-                        IsAlive = data.ContainsKey("al") ? Convert.ToInt32(data["al"]) == 1 : true,
-                        InVehicle = data.ContainsKey("iv") ? Convert.ToInt32(data["iv"]) == 1 : false,
-                        Health = data.ContainsKey("hp") ? Convert.ToInt16(data["hp"]) : 100,
+                        VelX = data.ContainsKey("vx") ? Convert.ToSByte(data["vx"]) / 10f : 0,
+                        VelY = data.ContainsKey("vy") ? Convert.ToSByte(data["vy"]) / 10f : 0,
+                        VelZ = data.ContainsKey("vz") ? Convert.ToSByte(data["vz"]) / 10f : 0,
+                        Heading = data.ContainsKey("h") ? Convert.ToByte(data["h"]) * 1.41f : 0,
+                        Animation = data.ContainsKey("a") ? GetAnimString(Convert.ToByte(data["a"])) : "idle",
+                        Health = data.ContainsKey("hp") ? Convert.ToByte(data["hp"]) * 4 : 100,
                         Weapon = data.ContainsKey("w") ? Convert.ToInt32(data["w"]) : 0,
                         Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
                     };
 
-                    // INTEREST MANAGEMENT: Só retornar jogadores próximos
+                    if (data.ContainsKey("f"))
+                    {
+                        UnpackFlags(Convert.ToByte(data["f"]), playerData);
+                    }
+
                     if (myPosition.HasValue)
                     {
                         float distance = (float)Math.Sqrt(
@@ -388,16 +375,15 @@ namespace Real_Life_System
                         );
 
                         if (distance > interestRadius)
-                            continue; // SKIP jogadores longe
+                            continue;
                     }
 
                     result[player.Key] = playerData;
-                    playersCache[player.Key] = playerData; // Atualizar cache
+                    playersCache[player.Key] = playerData;
                 }
 
-                // Limpar jogadores que não existem mais do cache
                 var existingIds = result.Keys.ToHashSet();
-                var toRemove = playersCache.Keys.Where(k => !existingIds.Contains(k)).ToList();
+                var toRemove = playersCache.Keys.Where(k => !existingIds.Contains(k) && k != myPlayerId).ToList();
                 foreach (var id in toRemove)
                 {
                     playersCache.TryRemove(id, out _);
@@ -407,20 +393,14 @@ namespace Real_Life_System
             }
             catch
             {
-                // Em caso de erro, retornar cache
                 return new Dictionary<string, PlayerData>(playersCache);
             }
         }
-
-        // ============================================================================
-        // VEÍCULOS - COM CACHE
-        // ============================================================================
 
         public async Task UpdateVehicleData(string sessionId, string vehicleId, VehicleData data)
         {
             try
             {
-                // DELTA COMPRESSION para veículos
                 if (lastSentVehicleData.ContainsKey(vehicleId))
                 {
                     var lastData = lastSentVehicleData[vehicleId];
@@ -431,10 +411,10 @@ namespace Real_Life_System
                         Math.Pow(data.PosZ - lastData.PosZ, 2)
                     );
 
-                    if (deltaPos < 0.5f && data.EngineRunning == lastData.EngineRunning)
+                    if (deltaPos < 0.3f && data.EngineRunning == lastData.EngineRunning)
                     {
                         CachedResponses++;
-                        return; // SKIP
+                        return;
                     }
                 }
 
@@ -444,24 +424,20 @@ namespace Real_Life_System
                     { "x", (short)(data.PosX * 10) },
                     { "y", (short)(data.PosY * 10) },
                     { "z", (short)(data.PosZ * 10) },
-                    { "vx", (short)(data.VelX * 100) },
-                    { "vy", (short)(data.VelY * 100) },
-                    { "vz", (short)(data.VelZ * 100) },
-                    { "h", (short)data.Heading },
+                    { "vx", (sbyte)(data.VelX * 10) },
+                    { "vy", (sbyte)(data.VelY * 10) },
+                    { "vz", (sbyte)(data.VelZ * 10) },
+                    { "h", (byte)(data.Heading / 1.41f) },
                     { "e", data.EngineRunning ? 1 : 0 },
-                    { "hp", (short)data.Health },
-                    { "t", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+                    { "hp", (byte)(data.Health / 10) },
+                    { "t", GetTimestamp() }
                 };
 
-                await firebase
-                    .Child("sessions")
-                    .Child(sessionId)
-                    .Child("vehicles")
-                    .Child(vehicleId)
-                    .PutAsync(compressedData);
-
-                TotalFirebaseCalls++;
-                TotalBytesSent += EstimateDataSize(compressedData);
+                pendingUpdates.Enqueue(new PendingUpdate
+                {
+                    Path = $"s/{sessionId}/v/{vehicleId}",
+                    Data = compressedData
+                });
 
                 lastSentVehicleData[vehicleId] = data;
                 vehiclesCache[vehicleId] = data;
@@ -473,7 +449,6 @@ namespace Real_Life_System
         {
             var now = DateTime.UtcNow;
 
-            // USAR CACHE
             if ((now - lastVehicleFetch).TotalMilliseconds < vehicleFetchInterval)
             {
                 CachedResponses++;
@@ -483,9 +458,9 @@ namespace Real_Life_System
             try
             {
                 var vehicles = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("vehicles")
+                    .Child("v")
                     .OnceAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
@@ -504,16 +479,15 @@ namespace Real_Life_System
                         PosX = data.ContainsKey("x") ? Convert.ToInt16(data["x"]) / 10f : 0,
                         PosY = data.ContainsKey("y") ? Convert.ToInt16(data["y"]) / 10f : 0,
                         PosZ = data.ContainsKey("z") ? Convert.ToInt16(data["z"]) / 10f : 0,
-                        VelX = data.ContainsKey("vx") ? Convert.ToInt16(data["vx"]) / 100f : 0,
-                        VelY = data.ContainsKey("vy") ? Convert.ToInt16(data["vy"]) / 100f : 0,
-                        VelZ = data.ContainsKey("vz") ? Convert.ToInt16(data["vz"]) / 100f : 0,
-                        Heading = data.ContainsKey("h") ? Convert.ToInt16(data["h"]) : 0,
+                        VelX = data.ContainsKey("vx") ? Convert.ToSByte(data["vx"]) / 10f : 0,
+                        VelY = data.ContainsKey("vy") ? Convert.ToSByte(data["vy"]) / 10f : 0,
+                        VelZ = data.ContainsKey("vz") ? Convert.ToSByte(data["vz"]) / 10f : 0,
+                        Heading = data.ContainsKey("h") ? Convert.ToByte(data["h"]) * 1.41f : 0,
                         EngineRunning = data.ContainsKey("e") ? Convert.ToInt32(data["e"]) == 1 : false,
-                        Health = data.ContainsKey("hp") ? Convert.ToInt16(data["hp"]) : 1000,
+                        Health = data.ContainsKey("hp") ? Convert.ToByte(data["hp"]) * 10 : 1000,
                         Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
                     };
 
-                    // Interest management para veículos
                     if (myPosition.HasValue)
                     {
                         float distance = (float)Math.Sqrt(
@@ -522,7 +496,7 @@ namespace Real_Life_System
                             Math.Pow(vehicleData.PosZ - myPosition.Value.Z, 2)
                         );
 
-                        if (distance > interestRadius * 1.2f) // Veículos um pouco mais longe
+                        if (distance > interestRadius * 1.5f)
                             continue;
                     }
 
@@ -545,15 +519,10 @@ namespace Real_Life_System
             }
         }
 
-        // ============================================================================
-        // AMBIENTE - COM CACHE LONGO
-        // ============================================================================
-
         public async Task UpdateEnvironment(string sessionId, int weather, int hour)
         {
             try
             {
-                // Só envia se mudou
                 if (environmentCache != null &&
                     environmentCache.Weather == weather &&
                     environmentCache.Hour == hour)
@@ -564,15 +533,15 @@ namespace Real_Life_System
 
                 var envDict = new Dictionary<string, object>
                 {
-                    { "w", weather },
-                    { "h", hour },
-                    { "t", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+                    { "w", (byte)weather },
+                    { "h", (byte)hour },
+                    { "t", GetTimestamp() }
                 };
 
                 await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("environment")
+                    .Child("e")
                     .PutAsync(envDict);
 
                 TotalFirebaseCalls++;
@@ -590,7 +559,6 @@ namespace Real_Life_System
         {
             var now = DateTime.UtcNow;
 
-            // CACHE de 5 segundos para ambiente
             if ((now - lastEnvironmentFetch).TotalMilliseconds < environmentFetchInterval && environmentCache != null)
             {
                 CachedResponses++;
@@ -600,9 +568,9 @@ namespace Real_Life_System
             try
             {
                 var env = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .Child(sessionId)
-                    .Child("environment")
+                    .Child("e")
                     .OnceSingleAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
@@ -624,27 +592,100 @@ namespace Real_Life_System
             }
         }
 
-        // ============================================================================
-        // UTILITÁRIOS
-        // ============================================================================
+        private async void ProcessBatchUpdates()
+        {
+            if (pendingUpdates.Count == 0) return;
+
+            try
+            {
+                var batch = new List<PendingUpdate>();
+                while (pendingUpdates.Count > 0 && batch.Count < 10)
+                {
+                    batch.Add(pendingUpdates.Dequeue());
+                }
+
+                var tasks = batch.Select(update =>
+                    firebase.Child(update.Path).PutAsync(update.Data)
+                );
+
+                await Task.WhenAll(tasks);
+
+                TotalFirebaseCalls += batch.Count;
+                TotalBytesSent += batch.Sum(u => EstimateDataSize(u.Data));
+            }
+            catch { }
+        }
 
         private long EstimateDataSize(Dictionary<string, object> data)
         {
             long size = 0;
             foreach (var kvp in data)
             {
-                size += kvp.Key.Length; // Chave
+                size += kvp.Key.Length;
 
                 if (kvp.Value is string s)
                     size += s.Length;
                 else if (kvp.Value is int || kvp.Value is float)
                     size += 4;
-                else if (kvp.Value is short)
+                else if (kvp.Value is short || kvp.Value is ushort)
                     size += 2;
+                else if (kvp.Value is byte || kvp.Value is sbyte)
+                    size += 1;
                 else if (kvp.Value is long)
                     size += 8;
             }
             return size;
+        }
+
+        private byte PackFlags(PlayerData data)
+        {
+            byte flags = 0;
+            if (data.IsAlive) flags |= 1;
+            if (data.InVehicle) flags |= 2;
+            return flags;
+        }
+
+        private void UnpackFlags(byte flags, PlayerData data)
+        {
+            data.IsAlive = (flags & 1) != 0;
+            data.InVehicle = (flags & 2) != 0;
+        }
+
+        private byte GetAnimByte(string anim)
+        {
+            switch (anim)
+            {
+                case "idle": return 0;
+                case "running": return 1;
+                case "shooting": return 2;
+                case "ragdoll": return 3;
+                default: return 0;
+            }
+        }
+
+        private string GetAnimString(byte anim)
+        {
+            switch (anim)
+            {
+                case 0: return "idle";
+                case 1: return "running";
+                case 2: return "shooting";
+                case 3: return "ragdoll";
+                default: return "idle";
+            }
+        }
+
+        private string GenerateCompactId()
+        {
+            const string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz";
+            var random = new Random();
+            return new string(Enumerable.Repeat(chars, 8)
+                .Select(s => s[random.Next(s.Length)]).ToArray());
+        }
+
+        private long GetTimestamp()
+        {
+            return DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         }
 
         public void SetInterestRadius(float radius)
@@ -665,7 +706,7 @@ namespace Real_Life_System
                 ? (float)CachedResponses / (TotalFirebaseCalls + CachedResponses) * 100
                 : 0;
 
-            return $"Firebase Calls: {TotalFirebaseCalls} | Cache Hits: {CachedResponses} ({hitRate:F1}%) | Data Sent: {TotalBytesSent / 1024}KB";
+            return $"FB: {TotalFirebaseCalls} | Cache: {CachedResponses} ({hitRate:F0}%) | SelfBlock: {SelfSyncBlocked} | Data: {TotalBytesSent / 1024}KB";
         }
 
         public void ClearCache()
@@ -677,34 +718,30 @@ namespace Real_Life_System
             lastSentVehicleData.Clear();
         }
 
-        // ============================================================================
-        // LIMPEZA
-        // ============================================================================
-
         public async Task CleanupOldSessions()
         {
             try
             {
                 var sessions = await firebase
-                    .Child("sessions")
+                    .Child("s")
                     .OnceAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
 
-                var currentTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+                var currentTime = GetTimestamp();
 
                 foreach (var session in sessions)
                 {
                     var data = session.Object;
                     if (data == null) continue;
 
-                    if (data.ContainsKey("lastHeartbeat"))
+                    if (data.ContainsKey("hb"))
                     {
-                        var heartbeat = Convert.ToInt64(data["lastHeartbeat"]);
-                        if (currentTime - heartbeat > 30)
+                        var heartbeat = Convert.ToInt64(data["hb"]);
+                        if (currentTime - heartbeat > 60)
                         {
                             await firebase
-                                .Child("sessions")
+                                .Child("s")
                                 .Child(session.Key)
                                 .DeleteAsync();
 

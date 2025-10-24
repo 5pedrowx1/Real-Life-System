@@ -71,6 +71,7 @@
     <Compile Include="Message.cs" />
     <Compile Include="NetLayer.cs" />
     <Compile Include="LobbyInfo.cs" />
+    <Compile Include="PendingUpdate.cs" />
     <Compile Include="PlayerData.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
     <Compile Include="RemotePlayer.cs" />

@@ -1,20 +1,16 @@
 ﻿using GTA;
 using GTA.Chrono;
 using GTA.Math;
+using GTA.Native;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
 using System.Threading.Tasks;
 
 namespace Real_Life_System
 {
-    /// <summary>
-    /// CoopScript OTIMIZADO com Cache Local
-    /// Reduz uso do Firebase em ~80%
-    /// </summary>
-    public class CoopScript : Script
+    public class MPScript : Script
     {
         FirebaseRelay firebase;
         string myPlayerId;
@@ -32,33 +28,31 @@ namespace Real_Life_System
         ConnectionState connectionState = ConnectionState.Disconnected;
 
         List<SessionInfo> cachedSessions = new List<SessionInfo>();
-
         ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
         ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
-
         Vector3 lastPos;
         float lastHeading;
         WeaponHash lastWeapon;
         bool lastInVehicle;
         Weather lastWeather = Weather.Clear;
         int lastHour = 12;
-
         DateTime lastPlayerSync = DateTime.MinValue;
         DateTime lastVehicleSync = DateTime.MinValue;
         DateTime lastEnvironmentSync = DateTime.MinValue;
         DateTime lastDataFetch = DateTime.MinValue;
         DateTime lastStatsDisplay = DateTime.MinValue;
-
-        // Adaptive sync rate
         float playerSpeed = 0f;
-        int adaptivePlayerSyncRate = 100;
-        int adaptiveVehicleSyncRate = 150;
+        int adaptivePlayerSyncRate = 50;
+        int adaptiveVehicleSyncRate = 100; 
+        int frameCount = 0;
+        DateTime lastFpsCheck = DateTime.UtcNow;
+        float currentFps = 0;
 
-        public CoopScript()
+        public MPScript()
         {
             try
             {
-                myPlayerId = Guid.NewGuid().ToString();
+                myPlayerId = GenerateCompactPlayerId();
                 myPlayerName = Game.Player.Name;
 
                 Tick += OnTick;
@@ -68,21 +62,19 @@ namespace Real_Life_System
                 string firebaseUrl = "https://gta-coop-mod-default-rtdb.europe-west1.firebasedatabase.app/";
                 firebase = new FirebaseRelay(firebaseUrl);
 
-                // Configurar taxas de sincronização otimizadas
+                firebase.SetMyPlayerId(myPlayerId);
+
                 firebase.SetSyncRates(
-                    playerMs: 200,      // 5x/segundo
-                    vehicleMs: 250,     // 4x/segundo
-                    environmentMs: 5000 // 1x/5segundos
+                    playerMs: 50,      
+                    vehicleMs: 100,    
+                    environmentMs: 15000 
                 );
-
-                // Interest management - 500m de raio
-                firebase.SetInterestRadius(500f);
-
+                firebase.SetInterestRadius(300f);
                 StartAutoConnect();
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[Coop] ERRO: {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[MP] ERRO: {ex.Message}", true);
                 throw;
             }
         }
@@ -91,23 +83,14 @@ namespace Real_Life_System
         {
             connectionState = ConnectionState.SearchingSessions;
 
-            GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-            GTA.UI.Notification.PostTicker("🎮 [Coop] GTA V Multiplayer", true);
-            GTA.UI.Notification.PostTicker("🔥 Firebase Relay OTIMIZADO", true);
-            GTA.UI.Notification.PostTicker("✅ Cache Local + Delta Compression", true);
-            GTA.UI.Notification.PostTicker("✅ 80% menos uso de dados!", true);
-            GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-
             await RefreshSessions();
 
-            GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-            GTA.UI.Notification.PostTicker("[Coop] Controles:", true);
+            GTA.UI.Notification.PostTicker("[MP] Controles:", true);
+            GTA.UI.Notification.PostTicker("  F8  = Stats", true);
             GTA.UI.Notification.PostTicker("  F9  = Criar Sessão", true);
             GTA.UI.Notification.PostTicker("  F10 = Listar Sessões", true);
             GTA.UI.Notification.PostTicker("  F11 = Conectar", true);
-            GTA.UI.Notification.PostTicker("  F12 = Atualizar", true);
-            GTA.UI.Notification.PostTicker("  F8  = Mostrar Stats", true);
-            GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
+            GTA.UI.Notification.PostTicker("  F12 = Refresh", true);
 
             await Task.Delay(3000);
 
@@ -135,39 +118,34 @@ namespace Real_Life_System
 
             if (cachedSessions.Count == 0)
             {
-                GTA.UI.Notification.PostTicker("[Firebase] 📡 Nenhuma sessão online", true);
+                GTA.UI.Notification.PostTicker("[FB] Nenhuma sessão online", true);
             }
             else
             {
-                GTA.UI.Notification.PostTicker($"[Firebase] 📡 {cachedSessions.Count} sessão(ões) encontrada(s)", true);
+                GTA.UI.Notification.PostTicker($"[FB] {cachedSessions.Count} sessão(ões)", true);
                 foreach (var session in cachedSessions.Take(3))
                 {
-                    GTA.UI.Notification.PostTicker($"  • {session.HostName} ({session.PlayerCount}/{session.MaxPlayers})", true);
+                    GTA.UI.Notification.PostTicker($"{session.HostName} ({session.PlayerCount}/{session.MaxPlayers})", true);
                 }
             }
         }
 
         async Task CreateSession()
         {
-            mySessionId = await firebase.CreateSession(myPlayerName, 8, myRegion);
+            mySessionId = await firebase.CreateSession(myPlayerName, 16, myRegion);
 
             if (mySessionId != null)
             {
                 connectionState = ConnectionState.Hosting;
-
-                GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-                GTA.UI.Notification.PostTicker("🎮 [Coop] SESSÃO CRIADA!", true);
-                GTA.UI.Notification.PostTicker($"📌 Host: {myPlayerName}", true);
-                GTA.UI.Notification.PostTicker($"🔑 ID: {mySessionId.Substring(0, 8)}...", true);
-                GTA.UI.Notification.PostTicker("👥 Jogadores: 1/8", true);
-                GTA.UI.Notification.PostTicker("✅ Sistema otimizado ativo!", true);
-                GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-
+                GTA.UI.Notification.PostTicker("[MP] SESSÃO CRIADA!", true);
+                GTA.UI.Notification.PostTicker($"Host: {myPlayerName}", true);
+                GTA.UI.Notification.PostTicker($"ID: {mySessionId}", true);
+                GTA.UI.Notification.PostTicker("Max: 16 jogadores", true);
                 await firebase.JoinSession(mySessionId, myPlayerId, myPlayerName);
             }
             else
             {
-                GTA.UI.Notification.PostTicker("❌ [Firebase] Erro ao criar sessão", true);
+                GTA.UI.Notification.PostTicker("[FB] Erro ao criar sessão", true);
             }
         }
 
@@ -180,10 +158,8 @@ namespace Real_Life_System
                 var session = cachedSessions.FirstOrDefault(s => s.SessionId == sessionId);
                 if (session != null)
                 {
-                    GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
-                    GTA.UI.Notification.PostTicker("🔌 [Coop] Entrando na sessão...", true);
-                    GTA.UI.Notification.PostTicker($"📌 Host: {session.HostName}", true);
-                    GTA.UI.Notification.PostTicker("═══════════════════════════════", true);
+                    GTA.UI.Notification.PostTicker("[MP] Conectando...", true);
+                    GTA.UI.Notification.PostTicker($" Host: {session.HostName}", true);
                 }
 
                 bool success = await firebase.JoinSession(sessionId, myPlayerId, myPlayerName);
@@ -191,18 +167,17 @@ namespace Real_Life_System
                 if (success)
                 {
                     connectionState = ConnectionState.Connected;
-                    GTA.UI.Notification.PostTicker("✅ [Coop] Conectado com sucesso!", true);
-                    GTA.UI.Notification.PostTicker("✅ [Coop] Cache local ativo!", true);
+                    GTA.UI.Notification.PostTicker("[MP] Conectado!", true);
                 }
                 else
                 {
-                    GTA.UI.Notification.PostTicker("❌ [Coop] Falha ao conectar", true);
+                    GTA.UI.Notification.PostTicker("[MP] Falha", true);
                     connectionState = ConnectionState.Disconnected;
                 }
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"❌ [Coop] Erro: {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[MP] Erro: {ex.Message}", true);
                 connectionState = ConnectionState.Disconnected;
             }
         }
@@ -215,53 +190,64 @@ namespace Real_Life_System
             var now = DateTime.UtcNow;
             var player = Game.Player.Character;
 
-            // ADAPTIVE SYNC RATE: Ajustar taxa baseado na velocidade
-            playerSpeed = player.Velocity.Length();
-            if (playerSpeed > 20f) // Rápido (veículo/correndo)
+            frameCount++;
+            if ((now - lastFpsCheck).TotalSeconds >= 1)
             {
-                adaptivePlayerSyncRate = 100; // 10x/segundo
-                adaptiveVehicleSyncRate = 100;
-            }
-            else if (playerSpeed > 5f) // Médio (andando)
-            {
-                adaptivePlayerSyncRate = 200; // 5x/segundo
-                adaptiveVehicleSyncRate = 200;
-            }
-            else // Parado/lento
-            {
-                adaptivePlayerSyncRate = 500; // 2x/segundo
-                adaptiveVehicleSyncRate = 500;
+                currentFps = frameCount / (float)(now - lastFpsCheck).TotalSeconds;
+                frameCount = 0;
+                lastFpsCheck = now;
             }
 
-            // Sincronizar jogador
+            playerSpeed = player.Velocity.Length();
+
+            if (playerSpeed > 50f)
+            {
+                adaptivePlayerSyncRate = 33;  
+                adaptiveVehicleSyncRate = 33;
+            }
+            else if (playerSpeed > 20f)
+            {
+                adaptivePlayerSyncRate = 50;  
+                adaptiveVehicleSyncRate = 50;
+            }
+            else if (playerSpeed > 5f)
+            {
+                adaptivePlayerSyncRate = 100; 
+                adaptiveVehicleSyncRate = 100;
+            }
+            else 
+            {
+                adaptivePlayerSyncRate = 200; 
+                adaptiveVehicleSyncRate = 200;
+            }
+
             if ((now - lastPlayerSync).TotalMilliseconds > adaptivePlayerSyncRate)
             {
                 SyncPlayer();
                 lastPlayerSync = now;
             }
 
-            // Sincronizar veículo
-            if (player.IsInVehicle() && (now - lastVehicleSync).TotalMilliseconds > adaptiveVehicleSyncRate)
+            if (player.IsInVehicle() && player.CurrentVehicle.GetPedOnSeat(VehicleSeat.Driver) == player)
             {
-                SyncVehicle(player.CurrentVehicle);
-                lastVehicleSync = now;
+                if ((now - lastVehicleSync).TotalMilliseconds > adaptiveVehicleSyncRate)
+                {
+                    SyncVehicle(player.CurrentVehicle);
+                    lastVehicleSync = now;
+                }
             }
 
-            // Host sincroniza ambiente
-            if (connectionState == ConnectionState.Hosting && (now - lastEnvironmentSync).TotalSeconds > 5)
+            if (connectionState == ConnectionState.Hosting && (now - lastEnvironmentSync).TotalSeconds > 15)
             {
                 SyncEnvironment();
                 lastEnvironmentSync = now;
             }
 
-            // Buscar dados remotos com cache
-            if ((now - lastDataFetch).TotalMilliseconds > 200)
+            if ((now - lastDataFetch).TotalMilliseconds > 100) 
             {
                 FetchRemoteData();
                 lastDataFetch = now;
             }
 
-            // Mostrar stats periodicamente
             if ((now - lastStatsDisplay).TotalSeconds > 30)
             {
                 ShowStats();
@@ -282,7 +268,6 @@ namespace Real_Life_System
             var weapon = player.Weapons.Current.Hash;
             var inVehicle = player.IsInVehicle();
 
-            // Delta já é checado dentro do FirebaseRelay
             lastPos = pos;
             lastHeading = heading;
             lastWeapon = weapon;
@@ -357,13 +342,12 @@ namespace Real_Life_System
             try
             {
                 var myPos = Game.Player.Character.Position;
-
-                // O cache é gerenciado automaticamente pelo FirebaseRelay
                 var players = await firebase.GetSessionPlayers(mySessionId, myPos);
 
                 foreach (var kvp in players)
                 {
-                    if (kvp.Key == myPlayerId) continue;
+                    if (kvp.Key == myPlayerId)
+                        continue;
 
                     var data = kvp.Value;
 
@@ -384,9 +368,9 @@ namespace Real_Life_System
                         player.Ped = World.CreatePed(PedHash.FreemodeMale01, player.TargetPos);
                         player.Ped.IsInvincible = true;
                         player.Ped.BlockPermanentEvents = true;
+                        player.Ped.CanRagdoll = false;
 
-                        // Notification quando jogador aparece
-                        GTA.UI.Notification.PostTicker($"👤 [Coop] {player.Name} entrou!", true);
+                        GTA.UI.Notification.PostTicker($"{player.Name} entrou!", true);
                     }
                 }
 
@@ -412,7 +396,6 @@ namespace Real_Life_System
                     }
                 }
 
-                // Ambiente (apenas se não for host)
                 if (connectionState != ConnectionState.Hosting)
                 {
                     var env = await firebase.GetEnvironment(mySessionId);
@@ -432,16 +415,43 @@ namespace Real_Life_System
             {
                 var player = kv.Value;
                 if (player.Ped == null || !player.Ped.Exists()) continue;
-
-                // Interpolação suave
-                player.Ped.Position = Vector3.Lerp(player.Ped.Position, player.TargetPos, 0.3f);
-                player.Ped.Heading = Lerp(player.Ped.Heading, player.TargetHeading, 0.3f);
+                float lerpFactor = playerSpeed > 20f ? 0.5f : 0.3f;
+                player.Ped.Position = Vector3.Lerp(player.Ped.Position, player.TargetPos, lerpFactor);
+                player.Ped.Heading = Lerp(player.Ped.Heading, player.TargetHeading, lerpFactor);
                 player.Ped.Velocity = player.TargetVel;
 
-                // Animações básicas
+                if (player.CurrentWeapon != WeaponHash.Unarmed)
+                {
+                    player.Ped.Weapons.Give(player.CurrentWeapon, 9999, true, true);
+                }
+
+                if (player.Health > 0)
+                {
+                    player.Ped.Health = (int)player.Health;
+                }
+
                 if (player.Animation == "running" && !player.Ped.IsRunning)
                 {
-                    // Fazer andar/correr
+                    player.Ped.Task.RunTo(player.TargetPos);
+                }
+                else if (player.Animation == "shooting" && !player.Ped.IsShooting)
+                {
+                    Vector3 shootPos = player.Ped.Position + player.Ped.ForwardVector * 1.0f;
+
+                    Function.Call(Hash.REQUEST_NAMED_PTFX_ASSET, "core");
+                    if (Function.Call<bool>(Hash.HAS_NAMED_PTFX_ASSET_LOADED, "core"))
+                    {
+                        Function.Call(Hash.START_PARTICLE_FX_NON_LOOPED_AT_COORD,
+                            "muz_flash",
+                            shootPos.X,
+                            shootPos.Y,
+                            shootPos.Z,
+                            0.0f, 0.0f, 0.0f,
+                            1.0f,
+                            false, false, false);
+                    }
+
+                    player.Ped.PlayAmbientSpeech("GUN_SHOT", "HUD_FRONTEND_DEFAULT_SOUNDSET");
                 }
             }
         }
@@ -452,27 +462,27 @@ namespace Real_Life_System
             {
                 var vehicle = kv.Value;
                 if (vehicle.Vehicle == null || !vehicle.Vehicle.Exists()) continue;
-
-                vehicle.Vehicle.Position = Vector3.Lerp(vehicle.Vehicle.Position, vehicle.TargetPos, 0.3f);
-                vehicle.Vehicle.Heading = Lerp(vehicle.Vehicle.Heading, vehicle.TargetHeading, 0.3f);
+                float lerpFactor = playerSpeed > 30f ? 0.6f : 0.4f;
+                vehicle.Vehicle.Position = Vector3.Lerp(vehicle.Vehicle.Position, vehicle.TargetPos, lerpFactor);
+                vehicle.Vehicle.Heading = Lerp(vehicle.Vehicle.Heading, vehicle.TargetHeading, lerpFactor);
                 vehicle.Vehicle.Velocity = vehicle.TargetVel;
                 vehicle.Vehicle.IsEngineRunning = vehicle.EngineRunning;
+                vehicle.Vehicle.Health = (int)vehicle.Health;
             }
         }
 
         void CleanupStaleEntities()
         {
             var now = DateTime.UtcNow;
-
-            foreach (var kv in remotePlayers.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 15).ToList())
+            foreach (var kv in remotePlayers.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
             {
                 if (kv.Value.Ped != null && kv.Value.Ped.Exists())
                     kv.Value.Ped.Delete();
                 remotePlayers.TryRemove(kv.Key, out _);
-                GTA.UI.Notification.PostTicker($"👤 [Coop] {kv.Value.Name} saiu", true);
+                GTA.UI.Notification.PostTicker($"👤 {kv.Value.Name} saiu", true);
             }
 
-            foreach (var kv in remoteVehicles.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 15).ToList())
+            foreach (var kv in remoteVehicles.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
             {
                 if (kv.Value.Vehicle != null && kv.Value.Vehicle.Exists())
                     kv.Value.Vehicle.Delete();
@@ -483,8 +493,8 @@ namespace Real_Life_System
         void ShowStats()
         {
             var stats = firebase.GetStats();
-            GTA.UI.Notification.PostTicker($"📊 [Stats] {stats}", true);
-            GTA.UI.Notification.PostTicker($"📊 [Jogadores] {remotePlayers.Count} online | Sync: {adaptivePlayerSyncRate}ms", true);
+            GTA.UI.Notification.PostTicker($"Status: {stats}", true);
+            GTA.UI.Notification.PostTicker($"Players: {remotePlayers.Count} | FPS: {currentFps:F0} | Sync: {adaptivePlayerSyncRate}ms", true);
         }
 
         async void OnKeyDown(object s, System.Windows.Forms.KeyEventArgs e)
@@ -497,7 +507,7 @@ namespace Real_Life_System
             {
                 if (connectionState == ConnectionState.Hosting)
                 {
-                    GTA.UI.Notification.PostTicker("⚠️ [Coop] Você já está hospedando!", true);
+                    GTA.UI.Notification.PostTicker("Já hospedando!", true);
                     return;
                 }
                 await CreateSession();
@@ -516,7 +526,7 @@ namespace Real_Life_System
                 if (bestSession != null)
                     await JoinSession(bestSession.SessionId);
                 else
-                    GTA.UI.Notification.PostTicker("[Firebase] Nenhuma sessão disponível!", true);
+                    GTA.UI.Notification.PostTicker("Nenhuma sessão!", true);
             }
             else if (e.KeyCode == System.Windows.Forms.Keys.F12)
             {
@@ -524,22 +534,34 @@ namespace Real_Life_System
             }
             else if (e.KeyCode == System.Windows.Forms.Keys.F7)
             {
-                // Limpar cache manualmente
                 firebase.ClearCache();
-                GTA.UI.Notification.PostTicker("🔄 [Cache] Cache limpo!", true);
+                GTA.UI.Notification.PostTicker("Cache limpo!", true);
             }
             else if (e.KeyCode == System.Windows.Forms.Keys.F6)
             {
-                // Debug: Criar veículo
+                // Debug: Spawn veículo
                 var player = Game.Player.Character;
                 var veh = World.CreateVehicle(VehicleHash.Adder, player.Position + player.ForwardVector * 5f);
-                GTA.UI.Notification.PostTicker("[Debug] Veículo criado!", true);
+                player.SetIntoVehicle(veh, VehicleSeat.Driver);
+                GTA.UI.Notification.PostTicker("Veículo spawned!", true);
+            }
+            else if (e.KeyCode == System.Windows.Forms.Keys.F5)
+            {
+                // Debug: Teleport aleatório
+                var player = Game.Player.Character;
+                var randomPos = player.Position + new Vector3(
+                    (float)(new Random().NextDouble() * 200 - 100),
+                    (float)(new Random().NextDouble() * 200 - 100),
+                    5f
+                );
+                player.Position = randomPos;
+                GTA.UI.Notification.PostTicker("Teleportado!", true);
             }
         }
 
         void OnAborted(object sender, EventArgs e)
         {
-            GTA.UI.Notification.PostTicker("[Coop] Desconectando...", true);
+            GTA.UI.Notification.PostTicker("[MP] Desconectando...", true);
 
             try
             {
@@ -568,12 +590,19 @@ namespace Real_Life_System
                         vehicle.Vehicle.Delete();
                 }
 
-                // Mostrar stats finais
-                GTA.UI.Notification.PostTicker($"📊 [Final] {firebase.GetStats()}", true);
+                GTA.UI.Notification.PostTicker($"FINAL: {firebase.GetStats()}", true);
             }
             catch { }
         }
 
         static float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+        static string GenerateCompactPlayerId()
+        {
+            const string chars = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+            var random = new Random();
+            return new string(Enumerable.Repeat(chars, 8)
+                .Select(s => s[random.Next(s.Length)]).ToArray());
+        }
     }
 }
