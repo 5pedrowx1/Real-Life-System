@@ -13,20 +13,16 @@ namespace Real_Life_System
 {
     public class CoopScript : Script
     {
-        FirebaseRelay firebase;
-        ChatSystem chatSystem;
-        string myPlayerId;
-        string myPlayerName;
-        string myRegion = "EU";
+        readonly FirebaseRelay firebase;
+        readonly ChatSystem chatSystem;
+        readonly string myPlayerId;
+        readonly string myPlayerName;
+        readonly string myRegion = "EU";
         string mySessionId;
         ConnectionState connectionState = ConnectionState.Disconnected;
         List<SessionInfo> cachedSessions = new List<SessionInfo>();
-        ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
-        ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
-        Vector3 lastPos;
-        float lastHeading;
-        WeaponHash lastWeapon;
-        bool lastInVehicle;
+        readonly ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
+        readonly ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
         Weather lastWeather = Weather.Clear;
         int lastHour = 12;
         DateTime lastPlayerSync = DateTime.MinValue;
@@ -709,7 +705,7 @@ namespace Real_Life_System
                     {
                         await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, cmd.Message);
                     }
-                    catch (Exception ex)
+                    catch
                     {
                         // Silently fail
                     }

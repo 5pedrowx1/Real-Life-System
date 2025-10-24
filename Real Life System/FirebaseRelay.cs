@@ -11,12 +11,12 @@ namespace Real_Life_System
 {
     public class FirebaseRelay
     {
-        private FirebaseClient firebase;
+        private readonly FirebaseClient firebase;
         private Timer heartbeatTimer;
         private string currentSessionId;
         private string myPlayerId;
-        private ConcurrentDictionary<string, PlayerData> playersCache = new ConcurrentDictionary<string, PlayerData>();
-        private ConcurrentDictionary<string, VehicleData> vehiclesCache = new ConcurrentDictionary<string, VehicleData>();
+        private readonly ConcurrentDictionary<string, PlayerData> playersCache = new ConcurrentDictionary<string, PlayerData>();
+        private readonly ConcurrentDictionary<string, VehicleData> vehiclesCache = new ConcurrentDictionary<string, VehicleData>();
         private EnvironmentData environmentCache = null;
         private List<ChatMessage> chatCache = new List<ChatMessage>();
         private DateTime lastPlayerFetch = DateTime.MinValue;
@@ -26,16 +26,16 @@ namespace Real_Life_System
         private int playerFetchInterval = 50;
         private int vehicleFetchInterval = 100;
         private int environmentFetchInterval = 10000;
-        private int chatFetchInterval = 500;
+        private readonly int chatFetchInterval = 500;
         private float interestRadius = 300f;
-        private Dictionary<string, PlayerData> lastSentPlayerData = new Dictionary<string, PlayerData>();
-        private Dictionary<string, VehicleData> lastSentVehicleData = new Dictionary<string, VehicleData>();
+        private readonly Dictionary<string, PlayerData> lastSentPlayerData = new Dictionary<string, PlayerData>();
+        private readonly Dictionary<string, VehicleData> lastSentVehicleData = new Dictionary<string, VehicleData>();
         public int TotalFirebaseCalls = 0;
         public int CachedResponses = 0;
         public int SelfSyncBlocked = 0;
         public long TotalBytesSent = 0;
-        private Queue<PendingUpdate> pendingUpdates = new Queue<PendingUpdate>();
-        private Timer batchTimer;
+        private readonly Queue<PendingUpdate> pendingUpdates = new Queue<PendingUpdate>();
+        private readonly Timer batchTimer;
 
         public FirebaseRelay(string firebaseUrl)
         {
@@ -52,22 +52,21 @@ namespace Real_Life_System
         {
             currentSessionId = GenerateCompactId();
 
-            var sessionData = new Dictionary<string, object>
-            {
-                { "h", hostName },
-                { "p", 1 },
-                { "m", maxPlayers },
-                { "r", region },
-                { "c", GetTimestamp() },
-                { "hb", GetTimestamp() }
-            };
-
             try
             {
                 await firebase
                     .Child("s")
                     .Child(currentSessionId)
-                    .PutAsync(sessionData);
+                    .Child("info")
+                    .PutAsync(new Dictionary<string, object>
+                    {
+                        { "h", hostName },
+                        { "p", 1 },
+                        { "m", maxPlayers },
+                        { "r", region },
+                        { "c", GetTimestamp() },
+                        { "hb", GetTimestamp() }
+                    });
 
                 TotalFirebaseCalls++;
                 heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 10000, 10000);
@@ -88,7 +87,7 @@ namespace Real_Life_System
             {
                 var sessions = await firebase
                     .Child("s")
-                    .OnceAsync<Dictionary<string, object>>();
+                    .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
 
@@ -97,30 +96,44 @@ namespace Real_Life_System
 
                 foreach (var session in sessions)
                 {
-                    var data = session.Object;
-                    if (data == null) continue;
-
-                    if (data.ContainsKey("hb"))
+                    try
                     {
-                        var heartbeat = Convert.ToInt64(data["hb"]);
-                        if (currentTime - heartbeat > 30) continue;
+                        var infoData = await firebase
+                            .Child("s")
+                            .Child(session.Key)
+                            .Child("info")
+                            .OnceSingleAsync<Dictionary<string, object>>();
+
+                        TotalFirebaseCalls++;
+
+                        if (infoData == null) continue;
+
+                        if (infoData.ContainsKey("hb"))
+                        {
+                            var heartbeat = Convert.ToInt64(infoData["hb"]);
+                            if (currentTime - heartbeat > 30) continue;
+                        }
+
+                        if (region != null && infoData.ContainsKey("r"))
+                        {
+                            if (infoData["r"].ToString() != region) continue;
+                        }
+
+                        var sessionInfo = new SessionInfo
+                        {
+                            SessionId = session.Key,
+                            HostName = infoData.ContainsKey("h") ? infoData["h"].ToString() : "Unknown",
+                            PlayerCount = infoData.ContainsKey("p") ? Convert.ToInt32(infoData["p"]) : 0,
+                            MaxPlayers = infoData.ContainsKey("m") ? Convert.ToInt32(infoData["m"]) : 8,
+                            Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
+                        };
+
+                        result.Add(sessionInfo);
                     }
-
-                    if (region != null && data.ContainsKey("r"))
+                    catch
                     {
-                        if (data["r"].ToString() != region) continue;
+                        continue;
                     }
-
-                    var sessionInfo = new SessionInfo
-                    {
-                        SessionId = session.Key,
-                        HostName = data.ContainsKey("h") ? data["h"].ToString() : "Unknown",
-                        PlayerCount = data.ContainsKey("p") ? Convert.ToInt32(data["p"]) : 0,
-                        MaxPlayers = data.ContainsKey("m") ? Convert.ToInt32(data["m"]) : 8,
-                        Region = data.ContainsKey("r") ? data["r"].ToString() : "?"
-                    };
-
-                    result.Add(sessionInfo);
                 }
 
                 return result;
@@ -159,6 +172,7 @@ namespace Real_Life_System
                 await firebase
                     .Child("s")
                     .Child(sessionId)
+                    .Child("info")
                     .Child("p")
                     .PutAsync(players.Count);
 
@@ -211,10 +225,15 @@ namespace Real_Life_System
                     await firebase
                         .Child("s")
                         .Child(sessionId)
+                        .Child("info")
                         .Child("p")
                         .PutAsync(players.Count);
 
                     TotalFirebaseCalls++;
+                }
+                else
+                {
+                    await DeleteSession(sessionId);
                 }
             }
             catch { }
@@ -246,6 +265,7 @@ namespace Real_Life_System
                 await firebase
                     .Child("s")
                     .Child(currentSessionId)
+                    .Child("info")
                     .Child("hb")
                     .PutAsync(GetTimestamp());
 
@@ -504,7 +524,7 @@ namespace Real_Life_System
                         VelY = data.ContainsKey("vy") ? Convert.ToSByte(data["vy"]) / 10f : 0,
                         VelZ = data.ContainsKey("vz") ? Convert.ToSByte(data["vz"]) / 10f : 0,
                         Heading = data.ContainsKey("h") ? Convert.ToByte(data["h"]) * 1.41f : 0,
-                        EngineRunning = data.ContainsKey("e") ? Convert.ToInt32(data["e"]) == 1 : false,
+                        EngineRunning = data.ContainsKey("e") && Convert.ToInt32(data["e"]) == 1,
                         Health = data.ContainsKey("hp") ? Convert.ToByte(data["hp"]) * 10 : 1000,
                         Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
                     };

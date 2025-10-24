@@ -10,8 +10,8 @@ namespace Real_Life_System
 {
     public class ChatSystem
     {
-        private List<ChatDisplayMessage> displayMessages = new List<ChatDisplayMessage>();
-        private HashSet<string> displayedMessageIds = new HashSet<string>();
+        private readonly List<ChatDisplayMessage> displayMessages = new List<ChatDisplayMessage>();
+        private readonly HashSet<string> displayedMessageIds = new HashSet<string>();
         private string currentInput = "";
         private bool isActive = false;
         private DateTime lastInputTime = DateTime.MinValue;
@@ -23,8 +23,8 @@ namespace Real_Life_System
         private const float BASE_Y = 0.52f;
         private const float LINE_HEIGHT = 0.025f;
         private const float INPUT_Y_OFFSET = 0.015f;
-        private readonly Color backgroundColor = Color.FromArgb(80, 0, 0, 0);
-        private readonly Color inputBackgroundColor = Color.FromArgb(100, 0, 0, 0);
+        private readonly Color backgroundColor = Color.FromArgb(0, 0, 0, 0);
+        private readonly Color inputBackgroundColor = Color.FromArgb(0, 0, 0, 0);
         private readonly Color textColor = Color.White;
         private readonly Color inputTextColor = Color.FromArgb(255, 255, 255, 255);
         private readonly Color playerNameColor = Color.FromArgb(255, 100, 200, 255); 
@@ -184,7 +184,7 @@ namespace Real_Life_System
                     }
                 }
             }
-            catch (Exception ex)
+            catch
             {
                 // Silently fail
             }
