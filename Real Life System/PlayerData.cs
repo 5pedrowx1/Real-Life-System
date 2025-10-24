@@ -1,6 +1,5 @@
 ﻿namespace Real_Life_System
 {
-
     public class PlayerData
     {
         public string Name;

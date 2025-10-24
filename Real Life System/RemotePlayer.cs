@@ -4,9 +4,6 @@ using System;
 
 namespace Real_Life_System
 {
-    // ============================================================================
-    // ESTRUTURAS DE DADOS (RemotePlayer)
-    // ============================================================================
     public class RemotePlayer
     {
         public string Id;

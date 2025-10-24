@@ -4,10 +4,6 @@ using System;
 
 namespace Real_Life_System
 {
-    // ============================================================================
-    // ESTRUTURAS DE DADOS (RemoteVehicle)
-    // ============================================================================
-
     public class RemoteVehicle
     {
         public string Id;

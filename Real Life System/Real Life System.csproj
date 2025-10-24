@@ -68,9 +68,6 @@
     <Compile Include="CoopScript.cs" />
     <Compile Include="EnvironmentData.cs" />
     <Compile Include="FirebaseRelay.cs" />
-    <Compile Include="Message.cs" />
-    <Compile Include="NetLayer.cs" />
-    <Compile Include="LobbyInfo.cs" />
     <Compile Include="PendingUpdate.cs" />
     <Compile Include="PlayerData.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
