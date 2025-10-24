@@ -399,11 +399,13 @@ namespace Real_Life_System
 
         public async Task UpdateVehicleData(string sessionId, string vehicleId, VehicleData data)
         {
+            string ownedVehicleId = $"{myPlayerId}_{vehicleId}";
+
             try
             {
-                if (lastSentVehicleData.ContainsKey(vehicleId))
+                if (lastSentVehicleData.ContainsKey(ownedVehicleId))
                 {
-                    var lastData = lastSentVehicleData[vehicleId];
+                    var lastData = lastSentVehicleData[ownedVehicleId];
 
                     float deltaPos = (float)Math.Sqrt(
                         Math.Pow(data.PosX - lastData.PosX, 2) +
@@ -430,17 +432,18 @@ namespace Real_Life_System
                     { "h", (byte)(data.Heading / 1.41f) },
                     { "e", data.EngineRunning ? 1 : 0 },
                     { "hp", (byte)(data.Health / 10) },
+                    { "o", myPlayerId },
                     { "t", GetTimestamp() }
                 };
 
                 pendingUpdates.Enqueue(new PendingUpdate
                 {
-                    Path = $"s/{sessionId}/v/{vehicleId}",
+                    Path = $"s/{sessionId}/v/{ownedVehicleId}",
                     Data = compressedData
                 });
 
-                lastSentVehicleData[vehicleId] = data;
-                vehiclesCache[vehicleId] = data;
+                lastSentVehicleData[ownedVehicleId] = data;
+                vehiclesCache[ownedVehicleId] = data;
             }
             catch { }
         }
@@ -472,6 +475,13 @@ namespace Real_Life_System
                 {
                     var data = vehicle.Object;
                     if (data == null) continue;
+
+                    string ownerId = data.ContainsKey("o") ? data["o"].ToString() : "";
+                    if (ownerId == myPlayerId)
+                    {
+                        SelfSyncBlocked++;
+                        continue;
+                    }
 
                     var vehicleData = new VehicleData
                     {
