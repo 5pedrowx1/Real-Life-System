@@ -636,7 +636,11 @@ namespace Real_Life_System
                 TotalFirebaseCalls++;
                 return messageId;
             }
-            catch { return null; }
+            catch (Exception ex)
+            {
+                GTA.UI.Notification.PostTicker($"[CHAT ERROR] {ex.Message}", true);
+                return null;
+            }
         }
 
         public async Task<List<ChatMessage>> GetChatMessages(string sessionId)

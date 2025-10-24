@@ -670,6 +670,12 @@ namespace Real_Life_System
 
                 foreach (var msg in messages)
                 {
+                    if (msg.PlayerId == myPlayerId)
+                    {
+                        chatSystem.MarkMessageAsDisplayed(msg.Id);
+                        continue;
+                    }
+
                     if (chatSystem.IsMessageDisplayed(msg.Id))
                         continue;
 
@@ -682,7 +688,6 @@ namespace Real_Life_System
                 // Silently fail
             }
         }
-
         async void SendChatMessage(string message)
         {
             if (string.IsNullOrEmpty(message) || string.IsNullOrEmpty(mySessionId)) return;
@@ -691,20 +696,28 @@ namespace Real_Life_System
             {
                 var cmd = chatSystem.ProcessCommand(message, myPlayerName);
 
-                if (cmd != null)
-                {
-                    string messageId = await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, message);
+                if (cmd == null) return;
 
-                    if (messageId != null)
+                string messageId = $"{myPlayerId}_{DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()}";
+
+                chatSystem.MarkMessageAsDisplayed(messageId);
+                chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
+
+                _ = Task.Run(async () =>
+                {
+                    try
                     {
-                        chatSystem.MarkMessageAsDisplayed(messageId);
-                        chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
+                        await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, cmd.Message);
                     }
-                }
+                    catch (Exception ex)
+                    {
+                        // Silently fail
+                    }
+                });
             }
             catch (Exception ex)
             {
-                chatSystem.AddErrorMessage($"Erro ao enviar: {ex.Message}");
+                chatSystem.AddErrorMessage($"Erro: {ex.Message}");
             }
         }
 
