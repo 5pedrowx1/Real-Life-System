@@ -23,8 +23,8 @@ namespace Real_Life_System
         private const float BASE_Y = 0.52f;
         private const float LINE_HEIGHT = 0.025f;
         private const float INPUT_Y_OFFSET = 0.015f;
-        private readonly Color backgroundColor = Color.FromArgb(140, 0, 0, 0);
-        private readonly Color inputBackgroundColor = Color.FromArgb(180, 0, 0, 0);
+        private readonly Color backgroundColor = Color.FromArgb(80, 0, 0, 0);
+        private readonly Color inputBackgroundColor = Color.FromArgb(100, 0, 0, 0);
         private readonly Color textColor = Color.White;
         private readonly Color inputTextColor = Color.FromArgb(255, 255, 255, 255);
         private readonly Color playerNameColor = Color.FromArgb(255, 100, 200, 255); 

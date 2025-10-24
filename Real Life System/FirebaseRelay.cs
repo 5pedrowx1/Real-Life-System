@@ -613,7 +613,7 @@ namespace Real_Life_System
             }
         }
 
-        public async Task SendChatMessage(string sessionId, string playerId, string playerName, string message)
+        public async Task<string> SendChatMessage(string sessionId, string playerId, string playerName, string message)
         {
             try
             {
@@ -634,8 +634,9 @@ namespace Real_Life_System
                     .PutAsync(messageData);
 
                 TotalFirebaseCalls++;
+                return messageId;
             }
-            catch { }
+            catch { return null; }
         }
 
         public async Task<List<ChatMessage>> GetChatMessages(string sessionId)

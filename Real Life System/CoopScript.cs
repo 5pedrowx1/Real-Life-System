@@ -693,8 +693,13 @@ namespace Real_Life_System
 
                 if (cmd != null)
                 {
-                    await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, message);
-                    chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
+                    string messageId = await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, message);
+
+                    if (messageId != null)
+                    {
+                        chatSystem.MarkMessageAsDisplayed(messageId);
+                        chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
+                    }
                 }
             }
             catch (Exception ex)
