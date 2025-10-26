@@ -23,6 +23,7 @@ namespace Real_Life_System
         List<SessionInfo> cachedSessions = new List<SessionInfo>();
         readonly ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
         readonly ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
+        private readonly Dictionary<int, string> vehicleIdMap = new Dictionary<int, string>();
         Weather lastWeather = Weather.Clear;
         int lastHour = 12;
         DateTime lastPlayerSync = DateTime.MinValue;
@@ -354,7 +355,7 @@ namespace Real_Life_System
 
                 if (inVehicle && player.CurrentVehicle != null && player.CurrentVehicle.Exists())
                 {
-                    vehicleId = player.CurrentVehicle.Handle.ToString();
+                    vehicleId = GetOrCreateVehicleId(player.CurrentVehicle);
 
                     if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.Driver) == player)
                         vehicleSeat = -1;
@@ -394,6 +395,16 @@ namespace Real_Life_System
             }
         }
 
+        private string GetOrCreateVehicleId(Vehicle veh)
+        {
+            if (vehicleIdMap.ContainsKey(veh.Handle))
+                return vehicleIdMap[veh.Handle];
+
+            string id = $"{myPlayerId}_{veh.Model.Hash}_{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
+            vehicleIdMap[veh.Handle] = id;
+            return id;
+        }
+
         async void SyncVehicle(Vehicle veh)
         {
             try
@@ -415,7 +426,7 @@ namespace Real_Life_System
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds()
                 };
 
-                await firebase.UpdateVehicleData(mySessionId, veh.Handle.ToString(), data);
+                await firebase.UpdateVehicleData(mySessionId, GetOrCreateVehicleId(veh), data);
             }
             catch
             {
@@ -482,8 +493,13 @@ namespace Real_Life_System
                             player.Ped.IsInvincible = false;
                             player.Ped.BlockPermanentEvents = true;
                             player.Ped.CanRagdoll = true;
+                            player.Ped.IsCollisionProof = false;
 
                             chatSystem.AddSystemMessage($"✓ {player.Name} entrou");
+                        }
+                        else
+                        {
+                            remotePlayers.TryRemove(kvp.Key, out _);
                         }
                     }
                 }
@@ -567,7 +583,7 @@ namespace Real_Life_System
                         }
 
                         player.Ped.Position = Vector3.Lerp(player.Ped.Position, player.TargetPos, lerpFactor);
-                        player.Ped.Heading = Lerp(player.Ped.Heading, player.TargetHeading, lerpFactor);
+                        player.Ped.Heading = LerpAngle(player.Ped.Heading, player.TargetHeading, lerpFactor);
                         player.Ped.Velocity = player.TargetVel;
                     }
 
@@ -709,17 +725,14 @@ namespace Real_Life_System
                 chatSystem.MarkMessageAsDisplayed(messageId);
                 chatSystem.AddMessage(myPlayerName, cmd.Message, cmd.Type);
 
-                _ = Task.Run(async () =>
+                try
                 {
-                    try
-                    {
-                        await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, cmd.Message);
-                    }
-                    catch
-                    {
-                        // Silently fail
-                    }
-                });
+                    await firebase.SendChatMessage(mySessionId, myPlayerId, myPlayerName, cmd.Message);
+                }
+                catch (Exception ex)
+                {
+                    chatSystem.AddErrorMessage($"Erro ao enviar: {ex.Message}");
+                }
             }
             catch (Exception ex)
             {
@@ -733,12 +746,20 @@ namespace Real_Life_System
             {
                 var now = DateTime.UtcNow;
 
-                foreach (var kv in remotePlayers.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
+                var stalePlayerIds = remotePlayers
+                    .Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10)
+                    .Select(x => x.Key)
+                    .ToList();
+
+                foreach (var playerId in stalePlayerIds)
                 {
-                    if (kv.Value.Ped != null && kv.Value.Ped.Exists())
-                        kv.Value.Ped.Delete();
-                    remotePlayers.TryRemove(kv.Key, out _);
-                    chatSystem.AddSystemMessage($"✗ {kv.Value.Name} saiu");
+                    if (remotePlayers.TryGetValue(playerId, out var player))
+                    {
+                        if (player.Ped != null && player.Ped.Exists())
+                            player.Ped.Delete();
+                        remotePlayers.TryRemove(playerId, out _);
+                        chatSystem.AddSystemMessage($"✗ {player.Name} saiu");
+                    }
                 }
 
                 foreach (var kv in remoteVehicles.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
@@ -923,15 +944,23 @@ namespace Real_Life_System
 
                 if (!string.IsNullOrEmpty(mySessionId))
                 {
-                    Task.Run(async () =>
+                    var cleanupTask = Task.Run(async () =>
                     {
-                        await firebase.LeaveSession(mySessionId, myPlayerId);
-
-                        if (connectionState == ConnectionState.Hosting)
+                        try
                         {
-                            await firebase.DeleteSession(mySessionId);
+                            await firebase.LeaveSession(mySessionId, myPlayerId);
+                            if (connectionState == ConnectionState.Hosting)
+                            {
+                                await firebase.DeleteSession(mySessionId);
+                            }
                         }
-                    }).Wait(2000);
+                        catch { }
+                    });
+
+                    if (!cleanupTask.Wait(3000))
+                    {
+                        chatSystem.AddSystemMessage("Timeout no cleanup");
+                    }
                 }
 
                 foreach (var player in remotePlayers.Values)
@@ -955,6 +984,12 @@ namespace Real_Life_System
         }
 
         static float Lerp(float a, float b, float t) => a + (b - a) * t;
+
+        private float LerpAngle(float from, float to, float t)
+        {
+            float delta = ((to - from + 540) % 360) - 180;
+            return from + delta * t;
+        }
 
         static string GenerateCompactPlayerId()
         {

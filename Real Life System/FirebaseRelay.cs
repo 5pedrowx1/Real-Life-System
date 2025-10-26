@@ -37,6 +37,7 @@ namespace Real_Life_System
         public long TotalBytesSent = 0;
         private readonly Queue<PendingUpdate> pendingUpdates = new Queue<PendingUpdate>();
         private readonly Timer batchTimer;
+        private readonly object batchLock = new object();
 
         public FirebaseRelay(string firebaseUrl, ChatSystem chat)
         {
@@ -64,7 +65,7 @@ namespace Real_Life_System
                     .Child("info")
                     .PutAsync(new Dictionary<string, object>
                     {
-                        { "hid", myPlayerId }, 
+                        { "hid", myPlayerId },
                         { "h", hostName },
                         { "p", 1 },
                         { "m", maxPlayers },
@@ -100,7 +101,6 @@ namespace Real_Life_System
 
                 if (infoData == null)
                 {
-                    chatSystem.AddSystemMessage($"{sessionId}: info null");
                     return null;
                 }
 
@@ -111,7 +111,6 @@ namespace Real_Life_System
 
                     if (age > 60)
                     {
-                        chatSystem.AddSystemMessage($"{sessionId}: heartbeat expirado ({age}s)");
                         return null;
                     }
                 }
@@ -121,7 +120,6 @@ namespace Real_Life_System
                     var sessionRegion = infoData["r"].ToString();
                     if (sessionRegion != region)
                     {
-                        chatSystem.AddSystemMessage($"{sessionId}: região diferente ({sessionRegion})");
                         return null;
                     }
                 }
@@ -135,12 +133,10 @@ namespace Real_Life_System
                     Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
                 };
 
-                chatSystem.AddSystemMessage($"✓ {sessionInfo.HostName} ({sessionInfo.PlayerCount}/{sessionInfo.MaxPlayers})");
                 return sessionInfo;
             }
-            catch (Exception ex)
+            catch
             {
-                chatSystem.AddSystemMessage($"Erro em {sessionId}: {ex.Message}");
                 return null;
             }
         }
@@ -149,19 +145,14 @@ namespace Real_Life_System
         {
             try
             {
-                GTA.UI.Notification.PostTicker("Buscando sessões...", true);
-
                 var sessions = await firebase
                     .Child("s")
                     .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
 
-                chatSystem.AddSystemMessage($"{sessions.Count} sessões no Firebase");
-
                 if (sessions.Count == 0)
                 {
-                    GTA.UI.Notification.PostTicker("Nenhuma sessão encontrada!", true);
                     return new List<SessionInfo>();
                 }
 
@@ -184,12 +175,11 @@ namespace Real_Life_System
                     }
                 }
 
-                chatSystem.AddSystemMessage($"{result.Count} sessões válidas");
                 return result;
             }
             catch (Exception ex)
             {
-                chatSystem.AddSystemMessage($"[FB] GetSessions erro: {ex.Message}");
+                chatSystem.AddErrorMessage($"GetSessions: {ex.Message}");
                 return new List<SessionInfo>();
             }
         }
@@ -200,8 +190,6 @@ namespace Real_Life_System
             {
                 currentSessionId = sessionId;
                 myPlayerId = playerId;
-
-                chatSystem.AddSystemMessage($"[FB] Entrando na sessão {sessionId.Substring(0, 6)}...");
 
                 await firebase
                     .Child("s")
@@ -231,12 +219,12 @@ namespace Real_Life_System
 
                 heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 10000);
 
-                chatSystem.AddSystemMessage($"[FB] ✓ Conectado! {players.Count} jogadores");
+                chatSystem.AddSystemMessage($"✓ Conectado! {players.Count} jogadores");
                 return true;
             }
             catch (Exception ex)
             {
-                chatSystem.AddSystemMessage($"[FB] Erro ao entrar: {ex.Message}");
+                chatSystem.AddErrorMessage($"Erro ao entrar: {ex.Message}");
                 return false;
             }
         }
@@ -427,10 +415,7 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
             }
-            catch
-            {
-                // Silently fail
-            }
+            catch { }
         }
 
         public async Task DeleteSession(string sessionId)
@@ -438,7 +423,6 @@ namespace Real_Life_System
             try
             {
                 heartbeatTimer?.Dispose();
-                batchTimer?.Dispose();
 
                 await firebase
                     .Child("s")
@@ -446,12 +430,8 @@ namespace Real_Life_System
                     .DeleteAsync();
 
                 TotalFirebaseCalls++;
-                GTA.UI.Notification.PostTicker("[FB] Sessão deletada", true);
             }
-            catch 
-            { 
-                // Silently fail
-            }
+            catch { }
         }
 
         public async Task CleanupExpiredSessions()
@@ -518,38 +498,7 @@ namespace Real_Life_System
                                     TotalFirebaseCalls++;
                                     deletedCount++;
                                 }
-                                else
-                                {
-                                    var newHostKey = players.First().Key;
-                                    var newHostData = players.First().Object as Dictionary<string, object>;
-                                    string newHostName = newHostData != null && newHostData.ContainsKey("n")
-                                        ? newHostData["n"].ToString()
-                                        : "Unknown";
-
-                                    await firebase
-                                        .Child("s")
-                                        .Child(session.Key)
-                                        .Child("info")
-                                        .PatchAsync(new Dictionary<string, object>
-                                        {
-                                    { "hid", newHostKey },
-                                    { "h", newHostName },
-                                    { "hb", currentTime }
-                                        });
-
-                                    TotalFirebaseCalls++;
-                                }
                             }
-                        }
-                        else
-                        {
-                            await firebase
-                                .Child("s")
-                                .Child(session.Key)
-                                .DeleteAsync();
-
-                            TotalFirebaseCalls++;
-                            deletedCount++;
                         }
                     }
                     catch { }
@@ -560,10 +509,7 @@ namespace Real_Life_System
                     chatSystem?.AddSystemMessage($"✓ {deletedCount} sessões limpas");
                 }
             }
-            catch 
-            {
-                // Silently fail
-            }
+            catch { }
         }
 
         private async Task SendHeartbeat()
@@ -584,16 +530,12 @@ namespace Real_Life_System
             catch { }
         }
 
+        // ✅ CORRIGIDO: Removida verificação de self-sync errada
         public async Task UpdatePlayerData(string sessionId, string playerId, PlayerData data)
         {
-            if (playerId == myPlayerId)
-            {
-                SelfSyncBlocked++;
-                return;
-            }
-
             try
             {
+                // ✅ Agora verifica se JÁ ENVIAMOS dados similares recentemente (rate limiting inteligente)
                 if (lastSentPlayerData.ContainsKey(playerId))
                 {
                     var lastData = lastSentPlayerData[playerId];
@@ -606,6 +548,7 @@ namespace Real_Life_System
 
                     float deltaHeading = Math.Abs(data.Heading - lastData.Heading);
 
+                    // Se mudou pouco, não envia
                     if (deltaPos < 0.2f && deltaHeading < 3f &&
                         data.Animation == lastData.Animation &&
                         data.InVehicle == lastData.InVehicle)
@@ -638,11 +581,14 @@ namespace Real_Life_System
                     compressedData["seat"] = (sbyte)data.VehicleSeat;
                 }
 
-                pendingUpdates.Enqueue(new PendingUpdate
+                lock (batchLock)
                 {
-                    Path = $"s/{sessionId}/p/{playerId}",
-                    Data = compressedData
-                });
+                    pendingUpdates.Enqueue(new PendingUpdate
+                    {
+                        Path = $"s/{sessionId}/p/{playerId}",
+                        Data = compressedData
+                    });
+                }
 
                 lastSentPlayerData[playerId] = data;
                 playersCache[playerId] = data;
@@ -650,6 +596,7 @@ namespace Real_Life_System
             catch { }
         }
 
+        // ✅ CORRIGIDO: Agora filtra corretamente ao retornar
         public async Task<Dictionary<string, PlayerData>> GetSessionPlayers(string sessionId, GTA.Math.Vector3? myPosition = null)
         {
             var now = DateTime.UtcNow;
@@ -657,7 +604,12 @@ namespace Real_Life_System
             if ((now - lastPlayerFetch).TotalMilliseconds < playerFetchInterval)
             {
                 CachedResponses++;
-                return new Dictionary<string, PlayerData>(playersCache);
+
+                // ✅ Retorna cache mas SEM o próprio jogador
+                return new Dictionary<string, PlayerData>(
+                    playersCache.Where(p => p.Key != myPlayerId)
+                    .ToDictionary(p => p.Key, p => p.Value)
+                );
             }
 
             try
@@ -675,12 +627,6 @@ namespace Real_Life_System
 
                 foreach (var player in players)
                 {
-                    if (player.Key == myPlayerId)
-                    {
-                        SelfSyncBlocked++;
-                        continue;
-                    }
-
                     var data = player.Object;
                     if (data == null) continue;
 
@@ -707,6 +653,16 @@ namespace Real_Life_System
                         UnpackFlags(Convert.ToByte(data["f"]), playerData);
                     }
 
+                    // Atualiza cache para TODOS os jogadores (incluindo próprio)
+                    playersCache[player.Key] = playerData;
+
+                    // ✅ Mas só adiciona ao resultado se NÃO for o próprio jogador
+                    if (player.Key == myPlayerId)
+                    {
+                        SelfSyncBlocked++;
+                        continue;
+                    }
+
                     if (myPosition.HasValue)
                     {
                         float distance = (float)Math.Sqrt(
@@ -720,21 +676,16 @@ namespace Real_Life_System
                     }
 
                     result[player.Key] = playerData;
-                    playersCache[player.Key] = playerData;
-                }
-
-                var existingIds = result.Keys.ToHashSet();
-                var toRemove = playersCache.Keys.Where(k => !existingIds.Contains(k) && k != myPlayerId).ToList();
-                foreach (var id in toRemove)
-                {
-                    playersCache.TryRemove(id, out _);
                 }
 
                 return result;
             }
             catch
             {
-                return new Dictionary<string, PlayerData>(playersCache);
+                return new Dictionary<string, PlayerData>(
+                    playersCache.Where(p => p.Key != myPlayerId)
+                    .ToDictionary(p => p.Key, p => p.Value)
+                );
             }
         }
 
@@ -777,11 +728,14 @@ namespace Real_Life_System
                     { "t", GetTimestamp() }
                 };
 
-                pendingUpdates.Enqueue(new PendingUpdate
+                lock (batchLock)
                 {
-                    Path = $"s/{sessionId}/v/{ownedVehicleId}",
-                    Data = compressedData
-                });
+                    pendingUpdates.Enqueue(new PendingUpdate
+                    {
+                        Path = $"s/{sessionId}/v/{ownedVehicleId}",
+                        Data = compressedData
+                    });
+                }
 
                 lastSentVehicleData[ownedVehicleId] = data;
                 vehiclesCache[ownedVehicleId] = data;
@@ -818,11 +772,6 @@ namespace Real_Life_System
                     if (data == null) continue;
 
                     string ownerId = data.ContainsKey("o") ? data["o"].ToString() : "";
-                    if (ownerId == myPlayerId)
-                    {
-                        SelfSyncBlocked++;
-                        continue;
-                    }
 
                     var vehicleData = new VehicleData
                     {
@@ -839,6 +788,15 @@ namespace Real_Life_System
                         Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
                     };
 
+                    vehiclesCache[vehicle.Key] = vehicleData;
+
+                    // ✅ Ignora veículos próprios ao retornar
+                    if (ownerId == myPlayerId)
+                    {
+                        SelfSyncBlocked++;
+                        continue;
+                    }
+
                     if (myPosition.HasValue)
                     {
                         float distance = (float)Math.Sqrt(
@@ -852,14 +810,6 @@ namespace Real_Life_System
                     }
 
                     result[vehicle.Key] = vehicleData;
-                    vehiclesCache[vehicle.Key] = vehicleData;
-                }
-
-                var existingIds = result.Keys.ToHashSet();
-                var toRemove = vehiclesCache.Keys.Where(k => !existingIds.Contains(k)).ToList();
-                foreach (var id in toRemove)
-                {
-                    vehiclesCache.TryRemove(id, out _);
                 }
 
                 return result;
