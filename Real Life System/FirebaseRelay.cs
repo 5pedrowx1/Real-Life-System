@@ -64,6 +64,7 @@ namespace Real_Life_System
                     .Child("info")
                     .PutAsync(new Dictionary<string, object>
                     {
+                        { "hid", myPlayerId }, 
                         { "h", hostName },
                         { "p", 1 },
                         { "m", maxPlayers },
@@ -75,12 +76,12 @@ namespace Real_Life_System
                 TotalFirebaseCalls++;
                 heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 10000);
 
-                chatSystem.AddSystemMessage($"[FB] Sessão criada: {currentSessionId.Substring(0, 6)}");
+                chatSystem.AddSystemMessage($"Sessão criada: {currentSessionId.Substring(0, 6)}");
                 return currentSessionId;
             }
             catch (Exception ex)
             {
-                chatSystem.AddSystemMessage($"[FB] Erro ao criar: {ex.Message}");
+                chatSystem.AddErrorMessage($"Erro ao criar: {ex.Message}");
                 return null;
             }
         }
@@ -245,7 +246,20 @@ namespace Real_Life_System
             try
             {
                 heartbeatTimer?.Dispose();
-                batchTimer?.Dispose();
+
+                var sessionInfo = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("info")
+                    .OnceSingleAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+
+                bool isHost = false;
+                if (sessionInfo != null && sessionInfo.ContainsKey("hid"))
+                {
+                    isHost = sessionInfo["hid"].ToString() == playerId;
+                }
 
                 await firebase
                     .Child("s")
@@ -263,6 +277,122 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls += 2;
 
+                var remainingPlayers = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("pl")
+                    .OnceAsync<object>();
+
+                TotalFirebaseCalls++;
+
+                if (remainingPlayers.Count == 0)
+                {
+                    await DeleteSession(sessionId);
+                }
+                else if (isHost)
+                {
+                    var newHostKey = remainingPlayers.First().Key;
+                    var newHostData = remainingPlayers.First().Object as Dictionary<string, object>;
+                    string newHostName = newHostData != null && newHostData.ContainsKey("n")
+                        ? newHostData["n"].ToString()
+                        : "Unknown";
+
+                    await firebase
+                        .Child("s")
+                        .Child(sessionId)
+                        .Child("info")
+                        .PatchAsync(new Dictionary<string, object>
+                        {
+                            { "hid", newHostKey },
+                            { "h", newHostName },
+                            { "p", remainingPlayers.Count }
+                        });
+
+                    TotalFirebaseCalls++;
+                }
+                else
+                {
+                    await firebase
+                        .Child("s")
+                        .Child(sessionId)
+                        .Child("info")
+                        .Child("p")
+                        .PutAsync(remainingPlayers.Count);
+
+                    TotalFirebaseCalls++;
+                }
+            }
+            catch (Exception ex)
+            {
+                chatSystem?.AddErrorMessage($"LeaveSession: {ex.Message}");
+            }
+        }
+
+        public async Task<bool> IsHost(string sessionId, string playerId)
+        {
+            try
+            {
+                var info = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("info")
+                    .OnceSingleAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+
+                if (info != null && info.ContainsKey("hid"))
+                {
+                    return info["hid"].ToString() == playerId;
+                }
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public async Task MonitorSessionHealth()
+        {
+            if (string.IsNullOrEmpty(currentSessionId)) return;
+
+            try
+            {
+                var info = await firebase
+                    .Child("s")
+                    .Child(currentSessionId)
+                    .Child("info")
+                    .OnceSingleAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+
+                if (info == null)
+                {
+                    return;
+                }
+
+                if (info.ContainsKey("hb"))
+                {
+                    var heartbeat = Convert.ToInt64(info["hb"]);
+                    var age = GetTimestamp() - heartbeat;
+
+                    if (age > 30)
+                    {
+                        if (myPlayerId != info["hid"].ToString())
+                        {
+                            await AttemptHostMigration(currentSessionId);
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        private async Task AttemptHostMigration(string sessionId)
+        {
+            try
+            {
                 var players = await firebase
                     .Child("s")
                     .Child(sessionId)
@@ -271,23 +401,36 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
 
-                if (players.Count > 0)
-                {
-                    await firebase
-                        .Child("s")
-                        .Child(sessionId)
-                        .Child("info")
-                        .Child("p")
-                        .PutAsync(players.Count);
-
-                    TotalFirebaseCalls++;
-                }
-                else
+                if (players.Count == 0)
                 {
                     await DeleteSession(sessionId);
+                    chatSystem.AddSystemMessage("Sessão deletada (sem players)");
+                    return;
                 }
+
+                var newHostKey = players.First().Key;
+                var newHostData = players.First().Object as Dictionary<string, object>;
+                string newHostName = newHostData != null && newHostData.ContainsKey("n")
+                    ? newHostData["n"].ToString()
+                    : "Unknown";
+
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("info")
+                    .PatchAsync(new Dictionary<string, object>
+                    {
+                        { "hid", newHostKey },
+                        { "h", newHostName },
+                        { "hb", GetTimestamp() }
+                    });
+
+                TotalFirebaseCalls++;
             }
-            catch { }
+            catch
+            {
+                // Silently fail
+            }
         }
 
         public async Task DeleteSession(string sessionId)
@@ -305,7 +448,122 @@ namespace Real_Life_System
                 TotalFirebaseCalls++;
                 GTA.UI.Notification.PostTicker("[FB] Sessão deletada", true);
             }
-            catch { }
+            catch 
+            { 
+                // Silently fail
+            }
+        }
+
+        public async Task CleanupExpiredSessions()
+        {
+            try
+            {
+                var sessions = await firebase
+                    .Child("s")
+                    .OnceAsync<object>();
+
+                TotalFirebaseCalls++;
+
+                if (sessions.Count == 0) return;
+
+                var currentTime = GetTimestamp();
+                int deletedCount = 0;
+
+                foreach (var session in sessions)
+                {
+                    try
+                    {
+                        var info = await firebase
+                            .Child("s")
+                            .Child(session.Key)
+                            .Child("info")
+                            .OnceSingleAsync<Dictionary<string, object>>();
+
+                        TotalFirebaseCalls++;
+
+                        if (info == null)
+                        {
+                            await firebase
+                                .Child("s")
+                                .Child(session.Key)
+                                .DeleteAsync();
+
+                            TotalFirebaseCalls++;
+                            deletedCount++;
+                            continue;
+                        }
+
+                        if (info.ContainsKey("hb"))
+                        {
+                            var heartbeat = Convert.ToInt64(info["hb"]);
+                            var age = currentTime - heartbeat;
+
+                            if (age > 30)
+                            {
+                                var players = await firebase
+                                    .Child("s")
+                                    .Child(session.Key)
+                                    .Child("pl")
+                                    .OnceAsync<object>();
+
+                                TotalFirebaseCalls++;
+
+                                if (players.Count == 0)
+                                {
+                                    await firebase
+                                        .Child("s")
+                                        .Child(session.Key)
+                                        .DeleteAsync();
+
+                                    TotalFirebaseCalls++;
+                                    deletedCount++;
+                                }
+                                else
+                                {
+                                    var newHostKey = players.First().Key;
+                                    var newHostData = players.First().Object as Dictionary<string, object>;
+                                    string newHostName = newHostData != null && newHostData.ContainsKey("n")
+                                        ? newHostData["n"].ToString()
+                                        : "Unknown";
+
+                                    await firebase
+                                        .Child("s")
+                                        .Child(session.Key)
+                                        .Child("info")
+                                        .PatchAsync(new Dictionary<string, object>
+                                        {
+                                    { "hid", newHostKey },
+                                    { "h", newHostName },
+                                    { "hb", currentTime }
+                                        });
+
+                                    TotalFirebaseCalls++;
+                                }
+                            }
+                        }
+                        else
+                        {
+                            await firebase
+                                .Child("s")
+                                .Child(session.Key)
+                                .DeleteAsync();
+
+                            TotalFirebaseCalls++;
+                            deletedCount++;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (deletedCount > 0)
+                {
+                    chatSystem?.AddSystemMessage($"✓ {deletedCount} sessões limpas");
+                }
+            }
+            catch 
+            {
+                // Silently fail
+            }
         }
 
         private async Task SendHeartbeat()
@@ -915,41 +1173,6 @@ namespace Real_Life_System
             chatCache.Clear();
             lastSentPlayerData.Clear();
             lastSentVehicleData.Clear();
-        }
-
-        public async Task CleanupOldSessions()
-        {
-            try
-            {
-                var sessions = await firebase
-                    .Child("s")
-                    .OnceAsync<Dictionary<string, object>>();
-
-                TotalFirebaseCalls++;
-
-                var currentTime = GetTimestamp();
-
-                foreach (var session in sessions)
-                {
-                    var data = session.Object;
-                    if (data == null) continue;
-
-                    if (data.ContainsKey("hb"))
-                    {
-                        var heartbeat = Convert.ToInt64(data["hb"]);
-                        if (currentTime - heartbeat > 60)
-                        {
-                            await firebase
-                                .Child("s")
-                                .Child(session.Key)
-                                .DeleteAsync();
-
-                            TotalFirebaseCalls++;
-                        }
-                    }
-                }
-            }
-            catch { }
         }
     }
 }

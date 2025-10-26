@@ -29,15 +29,16 @@ namespace Real_Life_System
         DateTime lastVehicleSync = DateTime.MinValue;
         DateTime lastEnvironmentSync = DateTime.MinValue;
         DateTime lastDataFetch = DateTime.MinValue;
-        DateTime lastStatsDisplay = DateTime.MinValue;
         DateTime lastChatFetch = DateTime.MinValue;
         DateTime lastDamageCheck = DateTime.MinValue;
+        DateTime lastSessionHealthCheck = DateTime.MinValue;
+        DateTime lastFpsCheck = DateTime.UtcNow;
         float playerSpeed = 0f;
         int adaptivePlayerSyncRate = 50;
         int adaptiveVehicleSyncRate = 100;
         int frameCount = 0;
-        DateTime lastFpsCheck = DateTime.UtcNow;
         float currentFps = 0;
+        bool isCurrentHost = false;
 
         public CoopScript()
         {
@@ -231,6 +232,21 @@ namespace Real_Life_System
 
                 if (player == null || !player.Exists()) return;
 
+                if ((now - lastSessionHealthCheck).TotalSeconds > 5)
+                {
+                    Task.Run(async () =>
+                    {
+                        await firebase.MonitorSessionHealth();
+                        isCurrentHost = await firebase.IsHost(mySessionId, myPlayerId);
+                    });
+                    lastSessionHealthCheck = now;
+                }
+
+                if (isCurrentHost && connectionState != ConnectionState.Hosting)
+                {
+                    connectionState = ConnectionState.Hosting;
+                }
+
                 frameCount++;
                 if ((now - lastFpsCheck).TotalSeconds >= 1)
                 {
@@ -302,12 +318,6 @@ namespace Real_Life_System
                 {
                     CheckDamageDealt();
                     lastDamageCheck = now;
-                }
-
-                if ((now - lastStatsDisplay).TotalSeconds > 30)
-                {
-                    ShowStats();
-                    lastStatsDisplay = now;
                 }
 
                 UpdateRemotePlayers();
@@ -751,7 +761,9 @@ namespace Real_Life_System
                 var stats = firebase.GetStats();
                 chatSystem.AddSystemMessage(stats);
                 chatSystem.AddSystemMessage($"Players: {remotePlayers.Count} | FPS: {currentFps:F0}");
-                chatSystem.AddSystemMessage($"Speed: {playerSpeed:F1} m/s");
+
+                string hostStatus = isCurrentHost ? "HOST" : "Cliente";
+                chatSystem.AddSystemMessage($"Status: {hostStatus} | Speed: {playerSpeed:F1} m/s");
             }
             catch
             {
@@ -853,7 +865,8 @@ namespace Real_Life_System
                 else if (e.KeyCode == Keys.F7)
                 {
                     firebase.ClearCache();
-                    chatSystem.AddSystemMessage("✓ Cache limpo");
+                    Task.Run(async () => await firebase.CleanupExpiredSessions());
+                    chatSystem.AddSystemMessage("✓ Limpeza completa iniciada");
                 }
             }
             catch (Exception ex)
