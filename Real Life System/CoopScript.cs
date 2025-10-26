@@ -53,7 +53,7 @@ namespace Real_Life_System
 
                 string firebaseUrl = "https://gta-coop-mod-default-rtdb.europe-west1.firebasedatabase.app/";
                 firebase = new FirebaseRelay(firebaseUrl);
-                chatSystem = new ChatSystem(); 
+                chatSystem = new ChatSystem();
 
                 firebase.SetMyPlayerId(myPlayerId);
 
@@ -85,7 +85,7 @@ namespace Real_Life_System
                 chatSystem.AddSystemMessage("Controles:");
                 chatSystem.AddSystemMessage("F8=Stats | F9=Criar | F10=Listar | F11=Conectar");
 
-                await Task.Delay(3000);
+                await Task.Delay(2000);
 
                 if (connectionState == ConnectionState.SearchingSessions)
                 {
@@ -97,28 +97,24 @@ namespace Real_Life_System
 
                     if (bestSession != null)
                     {
-                        chatSystem.AddSystemMessage($"Entrando na sessão de {bestSession.HostName}...");
+                        chatSystem.AddSystemMessage($"✓ Entrando: {bestSession.HostName}");
                         await JoinSession(bestSession.SessionId);
+                        return;
                     }
-                    else
-                    {
-                        var anySessions = cachedSessions.Any();
 
-                        if (anySessions)
-                        {
-                            chatSystem.AddSystemMessage("Todas as sessões estão cheias");
-                            var anySession = cachedSessions.FirstOrDefault();
-                            if (anySession != null)
-                            {
-                                await JoinSession(anySession.SessionId);
-                            }
-                        }
-                        else
-                        {
-                            chatSystem.AddSystemMessage("Criando nova sessão...");
-                            await CreateSession();
-                        }
+                    var emptySession = cachedSessions
+                        .Where(s => s.PlayerCount == 0 && s.PlayerCount < s.MaxPlayers)
+                        .FirstOrDefault();
+
+                    if (emptySession != null)
+                    {
+                        chatSystem.AddSystemMessage($"✓ Entrando: {emptySession.HostName}");
+                        await JoinSession(emptySession.SessionId);
+                        return;
                     }
+
+                    chatSystem.AddSystemMessage("✓ Criando nova sessão...");
+                    await CreateSession();
                 }
             }
             catch (Exception ex)
@@ -136,18 +132,16 @@ namespace Real_Life_System
 
                 cachedSessions = await firebase.GetAvailableSessions(myRegion);
 
-                chatSystem.AddSystemMessage($"Encontradas: {cachedSessions.Count} sessões");
-
                 if (cachedSessions.Count == 0)
                 {
-                    chatSystem.AddSystemMessage("Nenhuma sessão online");
+                    chatSystem.AddSystemMessage("Nenhuma sessão encontrada");
                 }
                 else
                 {
-                    chatSystem.AddSystemMessage($"{cachedSessions.Count} sessão(ões) encontrada(s)");
+                    chatSystem.AddSystemMessage($"✓ {cachedSessions.Count} sessão(ões)");
                     foreach (var session in cachedSessions.Take(3))
                     {
-                        chatSystem.AddSystemMessage($"→ {session.HostName} ({session.PlayerCount}/{session.MaxPlayers})");
+                        chatSystem.AddSystemMessage($"  → {session.HostName} ({session.PlayerCount}/{session.MaxPlayers})");
                     }
                 }
             }
@@ -168,6 +162,7 @@ namespace Real_Life_System
                     connectionState = ConnectionState.Hosting;
                     chatSystem.AddSystemMessage("SESSÃO CRIADA!");
                     chatSystem.AddSystemMessage($"Host: {myPlayerName}");
+                    chatSystem.AddSystemMessage($"ID: {mySessionId.Substring(0, 6)}");
                     await firebase.JoinSession(mySessionId, myPlayerId, myPlayerName);
                 }
                 else
@@ -205,7 +200,7 @@ namespace Real_Life_System
                 if (success)
                 {
                     connectionState = ConnectionState.Connected;
-                    chatSystem.AddSystemMessage("CONECTADO!");
+                    chatSystem.AddSystemMessage("✓ CONECTADO!");
                     chatSystem.AddSystemMessage("Bem-vindo ao servidor");
                     chatSystem.AddSystemMessage("Digite /help para comandos");
                 }
@@ -478,7 +473,7 @@ namespace Real_Life_System
                             player.Ped.BlockPermanentEvents = true;
                             player.Ped.CanRagdoll = true;
 
-                            chatSystem.AddSystemMessage($"{player.Name} entrou no servidor");
+                            chatSystem.AddSystemMessage($"✓ {player.Name} entrou");
                         }
                     }
                 }
@@ -688,6 +683,7 @@ namespace Real_Life_System
                 // Silently fail
             }
         }
+
         async void SendChatMessage(string message)
         {
             if (string.IsNullOrEmpty(message) || string.IsNullOrEmpty(mySessionId)) return;
@@ -732,7 +728,7 @@ namespace Real_Life_System
                     if (kv.Value.Ped != null && kv.Value.Ped.Exists())
                         kv.Value.Ped.Delete();
                     remotePlayers.TryRemove(kv.Key, out _);
-                    chatSystem.AddSystemMessage($"{kv.Value.Name} saiu do servidor");
+                    chatSystem.AddSystemMessage($"✗ {kv.Value.Name} saiu");
                 }
 
                 foreach (var kv in remoteVehicles.Where(x => (now - x.Value.LastUpdate).TotalSeconds > 10).ToList())
@@ -754,7 +750,8 @@ namespace Real_Life_System
             {
                 var stats = firebase.GetStats();
                 chatSystem.AddSystemMessage(stats);
-                chatSystem.AddSystemMessage($"Jogadores: {remotePlayers.Count} | FPS: {currentFps:F0}");
+                chatSystem.AddSystemMessage($"Players: {remotePlayers.Count} | FPS: {currentFps:F0}");
+                chatSystem.AddSystemMessage($"Speed: {playerSpeed:F1} m/s");
             }
             catch
             {
@@ -804,7 +801,12 @@ namespace Real_Life_System
                 {
                     if (connectionState == ConnectionState.Hosting)
                     {
-                        chatSystem.AddSystemMessage("Já está hospedando uma sessão!");
+                        chatSystem.AddSystemMessage("Já está hospedando!");
+                        return;
+                    }
+                    if (connectionState == ConnectionState.Connected)
+                    {
+                        chatSystem.AddSystemMessage("Já está conectado!");
                         return;
                     }
                     Task.Run(async () => await CreateSession());
@@ -815,24 +817,30 @@ namespace Real_Life_System
                 }
                 else if (e.KeyCode == Keys.F11)
                 {
+                    if (connectionState == ConnectionState.Connected || connectionState == ConnectionState.Hosting)
+                    {
+                        chatSystem.AddSystemMessage("Já está conectado!");
+                        return;
+                    }
+
                     var bestSession = cachedSessions
                         .Where(session => session.PlayerCount < session.MaxPlayers)
                         .OrderByDescending(session => session.PlayerCount)
                         .FirstOrDefault();
 
                     if (bestSession != null)
+                    {
                         Task.Run(async () => await JoinSession(bestSession.SessionId));
+                    }
                     else
+                    {
                         chatSystem.AddSystemMessage("Nenhuma sessão disponível!");
-                }
-                else if (e.KeyCode == Keys.F12)
-                {
-                    Task.Run(async () => await RefreshSessions());
+                    }
                 }
                 else if (e.KeyCode == Keys.F7)
                 {
                     firebase.ClearCache();
-                    chatSystem.AddSystemMessage("Cache limpo");
+                    chatSystem.AddSystemMessage("✓ Cache limpo");
                 }
             }
             catch (Exception ex)

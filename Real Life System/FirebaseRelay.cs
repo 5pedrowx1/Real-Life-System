@@ -12,6 +12,7 @@ namespace Real_Life_System
     public class FirebaseRelay
     {
         private readonly FirebaseClient firebase;
+        readonly ChatSystem chatSystem;
         private Timer heartbeatTimer;
         private string currentSessionId;
         private string myPlayerId;
@@ -54,6 +55,8 @@ namespace Real_Life_System
 
             try
             {
+                var timestamp = GetTimestamp();
+
                 await firebase
                     .Child("s")
                     .Child(currentSessionId)
@@ -64,19 +67,19 @@ namespace Real_Life_System
                         { "p", 1 },
                         { "m", maxPlayers },
                         { "r", region },
-                        { "c", GetTimestamp() },
-                        { "hb", GetTimestamp() }
+                        { "c", timestamp },
+                        { "hb", timestamp }
                     });
 
                 TotalFirebaseCalls++;
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 10000, 10000);
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 10000);
 
-                GTA.UI.Notification.PostTicker($"[FB] Sessão: {currentSessionId.Substring(0, 6)}", true);
+                chatSystem.AddSystemMessage($"[FB] Sessão criada: {currentSessionId.Substring(0, 6)}");
                 return currentSessionId;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
+                chatSystem.AddSystemMessage($"[FB] Erro ao criar: {ex.Message}");
                 return null;
             }
         }
@@ -95,31 +98,33 @@ namespace Real_Life_System
 
                 if (infoData == null)
                 {
+                    chatSystem.AddSystemMessage($"{sessionId}: info null");
                     return null;
                 }
 
                 if (infoData.ContainsKey("hb"))
                 {
                     var heartbeat = Convert.ToInt64(infoData["hb"]);
-                    if (currentTime - heartbeat > 30)
+                    var age = currentTime - heartbeat;
+
+                    if (age > 60)
                     {
+                        chatSystem.AddSystemMessage($"{sessionId}: heartbeat expirado ({age}s)");
                         return null;
                     }
-                }
-                else
-                {
-                    return null;
                 }
 
                 if (region != null && infoData.ContainsKey("r"))
                 {
-                    if (infoData["r"].ToString() != region)
+                    var sessionRegion = infoData["r"].ToString();
+                    if (sessionRegion != region)
                     {
+                        chatSystem.AddSystemMessage($"{sessionId}: região diferente ({sessionRegion})");
                         return null;
                     }
                 }
 
-                return new SessionInfo
+                var sessionInfo = new SessionInfo
                 {
                     SessionId = sessionId,
                     HostName = infoData.ContainsKey("h") ? infoData["h"].ToString() : "Unknown",
@@ -127,10 +132,13 @@ namespace Real_Life_System
                     MaxPlayers = infoData.ContainsKey("m") ? Convert.ToInt32(infoData["m"]) : 8,
                     Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
                 };
+
+                chatSystem.AddSystemMessage($"✓ {sessionInfo.HostName} ({sessionInfo.PlayerCount}/{sessionInfo.MaxPlayers})");
+                return sessionInfo;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] ProcessSession {sessionId}: {ex.Message}", true);
+                chatSystem.AddSystemMessage($"Erro em {sessionId}: {ex.Message}");
                 return null;
             }
         }
@@ -139,11 +147,21 @@ namespace Real_Life_System
         {
             try
             {
+                GTA.UI.Notification.PostTicker("Buscando sessões...", true);
+
                 var sessions = await firebase
                     .Child("s")
                     .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
+
+                chatSystem.AddSystemMessage($"{sessions.Count} sessões no Firebase");
+
+                if (sessions.Count == 0)
+                {
+                    GTA.UI.Notification.PostTicker("Nenhuma sessão encontrada!", true);
+                    return new List<SessionInfo>();
+                }
 
                 var currentTime = GetTimestamp();
                 var result = new List<SessionInfo>();
@@ -164,11 +182,12 @@ namespace Real_Life_System
                     }
                 }
 
+                chatSystem.AddSystemMessage($"{result.Count} sessões válidas");
                 return result;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] GetSessions: {ex.Message}", true);
+                chatSystem.AddSystemMessage($"[FB] GetSessions erro: {ex.Message}");
                 return new List<SessionInfo>();
             }
         }
@@ -179,6 +198,8 @@ namespace Real_Life_System
             {
                 currentSessionId = sessionId;
                 myPlayerId = playerId;
+
+                chatSystem.AddSystemMessage($"[FB] Entrando na sessão {sessionId.Substring(0, 6)}...");
 
                 await firebase
                     .Child("s")
@@ -206,13 +227,14 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
 
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 10000, 10000);
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 10000);
 
+                chatSystem.AddSystemMessage($"[FB] ✓ Conectado! {players.Count} jogadores");
                 return true;
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
+                chatSystem.AddSystemMessage($"[FB] Erro ao entrar: {ex.Message}");
                 return false;
             }
         }
@@ -280,6 +302,7 @@ namespace Real_Life_System
                     .DeleteAsync();
 
                 TotalFirebaseCalls++;
+                GTA.UI.Notification.PostTicker("[FB] Sessão deletada", true);
             }
             catch { }
         }
@@ -686,7 +709,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[CHAT ERROR] {ex.Message}", true);
+                chatSystem.AddSystemMessage($"[CHAT ERROR] {ex.Message}");
                 return null;
             }
         }
