@@ -751,11 +751,33 @@ namespace Real_Life_System
                 lastVehicleFetch = now;
 
                 var result = new Dictionary<string, VehicleData>();
+                var currentTime = GetTimestamp();
 
                 foreach (var vehicle in vehicles)
                 {
                     var data = vehicle.Object;
                     if (data == null) continue;
+
+                    long timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0;
+                    long age = currentTime - timestamp;
+
+                    if (age > 30)
+                    {
+                        _ = Task.Run(async () =>
+                        {
+                            try
+                            {
+                                await firebase
+                                    .Child("s")
+                                    .Child(sessionId)
+                                    .Child("v")
+                                    .Child(vehicle.Key)
+                                    .DeleteAsync();
+                            }
+                            catch { }
+                        });
+                        continue;
+                    }
 
                     string ownerId = data.ContainsKey("o") ? data["o"].ToString() : "";
                     if (ownerId == myPlayerId)
@@ -776,7 +798,7 @@ namespace Real_Life_System
                         Heading = data.ContainsKey("h") ? Convert.ToByte(data["h"]) * 1.41f : 0,
                         EngineRunning = data.ContainsKey("e") && Convert.ToInt32(data["e"]) == 1,
                         Health = data.ContainsKey("hp") ? Convert.ToByte(data["hp"]) * 10 : 1000,
-                        Timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0
+                        Timestamp = timestamp
                     };
 
                     if (myPosition.HasValue)
@@ -808,6 +830,83 @@ namespace Real_Life_System
             {
                 return new Dictionary<string, VehicleData>(vehiclesCache);
             }
+        }
+
+        public async Task DeleteVehicleData(string sessionId, string vehicleId)
+        {
+            try
+            {
+                string fullVehicleId = vehicleId.StartsWith(myPlayerId)
+                    ? vehicleId
+                    : $"{myPlayerId}_{vehicleId}";
+
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("v")
+                    .Child(fullVehicleId)
+                    .DeleteAsync();
+
+                TotalFirebaseCalls++;
+
+                vehiclesCache.TryRemove(fullVehicleId, out _);
+                lastSentVehicleData.Remove(fullVehicleId);
+            }
+            catch (Exception ex)
+            {
+                chatSystem?.AddErrorMessage($"DeleteVehicle: {ex.Message}");
+            }
+        }
+
+        public async Task CleanupOldVehicles(string sessionId)
+        {
+            try
+            {
+                var vehicles = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("v")
+                    .OnceAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+
+                if (vehicles.Count == 0) return;
+
+                var currentTime = GetTimestamp();
+                int deletedCount = 0;
+
+                foreach (var vehicle in vehicles)
+                {
+                    try
+                    {
+                        var data = vehicle.Object;
+                        if (data == null) continue;
+
+                        long timestamp = data.ContainsKey("t") ? Convert.ToInt64(data["t"]) : 0;
+                        long age = currentTime - timestamp;
+
+                        if (age > 60)
+                        {
+                            await firebase
+                                .Child("s")
+                                .Child(sessionId)
+                                .Child("v")
+                                .Child(vehicle.Key)
+                                .DeleteAsync();
+
+                            TotalFirebaseCalls++;
+                            deletedCount++;
+                        }
+                    }
+                    catch { }
+                }
+
+                if (deletedCount > 0)
+                {
+                    chatSystem?.AddSystemMessage($"✓ {deletedCount} veículo(s) limpo(s)");
+                }
+            }
+            catch { }
         }
 
         public async Task UpdateEnvironment(string sessionId, int weather, int hour)

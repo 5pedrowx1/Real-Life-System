@@ -13,35 +13,38 @@ namespace Real_Life_System
 {
     public class CoopScript : Script
     {
-        readonly FirebaseRelay firebase;
-        readonly ChatSystem chatSystem;
-        readonly string myPlayerId;
-        readonly string myPlayerName;
-        readonly string myRegion = "EU";
-        string mySessionId;
-        ConnectionState connectionState = ConnectionState.Disconnected;
-        List<SessionInfo> cachedSessions = new List<SessionInfo>();
-        readonly ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
-        readonly ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
+        private readonly FirebaseRelay firebase;
+        private readonly ChatSystem chatSystem;
+        private readonly string myPlayerId;
+        private readonly string myPlayerName;
+        private readonly string myRegion = "EU";
+        private string mySessionId;
+        private ConnectionState connectionState = ConnectionState.Disconnected;
+        private List<SessionInfo> cachedSessions = new List<SessionInfo>();
+        private readonly ConcurrentDictionary<string, RemotePlayer> remotePlayers = new ConcurrentDictionary<string, RemotePlayer>();
+        private readonly ConcurrentDictionary<string, RemoteVehicle> remoteVehicles = new ConcurrentDictionary<string, RemoteVehicle>();
         private readonly Dictionary<int, string> vehicleIdMap = new Dictionary<int, string>();
-        Weather lastWeather = Weather.Clear;
-        int lastHour = 12;
-        DateTime lastPlayerSync = DateTime.MinValue;
-        DateTime lastVehicleSync = DateTime.MinValue;
-        DateTime lastEnvironmentSync = DateTime.MinValue;
-        DateTime lastDataFetch = DateTime.MinValue;
-        DateTime lastChatFetch = DateTime.MinValue;
-        DateTime lastDamageCheck = DateTime.MinValue;
-        DateTime lastSessionHealthCheck = DateTime.MinValue;
-        DateTime lastFpsCheck = DateTime.UtcNow;
-        float playerSpeed = 0f;
-        int adaptivePlayerSyncRate = 100;
-        int adaptiveVehicleSyncRate = 150;
-        int frameCount = 0;
-        float currentFps = 0;
-        bool isCurrentHost = false;
+        private readonly HashSet<string> activeVehicleIds = new HashSet<string>();
+        private Weather lastWeather = Weather.Clear;
+        private int lastHour = 12;
+        private DateTime lastPlayerSync = DateTime.MinValue;
+        private DateTime lastVehicleSync = DateTime.MinValue;
+        private DateTime lastEnvironmentSync = DateTime.MinValue;
+        private DateTime lastDataFetch = DateTime.MinValue;
+        private DateTime lastChatFetch = DateTime.MinValue;
+        private DateTime lastDamageCheck = DateTime.MinValue;
+        private DateTime lastSessionHealthCheck = DateTime.MinValue;
+        private DateTime lastFpsCheck = DateTime.UtcNow;
+        private DateTime lastVehicleCleanup = DateTime.MinValue;
+        private float playerSpeed = 0f;
+        private int adaptivePlayerSyncRate = 100;
+        private int adaptiveVehicleSyncRate = 150;
+        private int frameCount = 0;
+        private float currentFps = 0;
+        private bool isCurrentHost = false;
         private bool wasShooting = false;
         private Vector3 lastShootDir = Vector3.Zero;
+        private string lastVehicleId = null;
 
         public CoopScript()
         {
@@ -235,6 +238,36 @@ namespace Real_Life_System
 
                 if (player == null || !player.Exists()) return;
 
+                if (player.IsInVehicle() && player.CurrentVehicle != null && player.CurrentVehicle.Exists())
+                {
+                    if (player.CurrentVehicle.GetPedOnSeat(VehicleSeat.Driver) == player)
+                    {
+                        string currentVehicleId = GetOrCreateVehicleId(player.CurrentVehicle);
+                        lastVehicleId = currentVehicleId;
+
+                        if ((now - lastVehicleSync).TotalMilliseconds > adaptiveVehicleSyncRate)
+                        {
+                            SyncVehicle(player.CurrentVehicle);
+                            lastVehicleSync = now;
+                        }
+                    }
+                }
+                else
+                {
+                    if (!string.IsNullOrEmpty(lastVehicleId))
+                    {
+                        Task.Run(async () =>
+                        {
+                            await firebase.DeleteVehicleData(mySessionId, lastVehicleId);
+                            chatSystem.AddSystemMessage($"Veículo removido: {lastVehicleId.Substring(0, 8)}");
+                        });
+
+                        activeVehicleIds.Remove(lastVehicleId);
+                        vehicleIdMap.Remove(vehicleIdMap.FirstOrDefault(x => x.Value == lastVehicleId).Key);
+                        lastVehicleId = null;
+                    }
+                }
+
                 if ((now - lastSessionHealthCheck).TotalSeconds > 5)
                 {
                     Task.Run(async () =>
@@ -299,7 +332,6 @@ namespace Real_Life_System
                     }
                 }
 
-                // NOVO: Sync de projéteis quando atira
                 DetectAndSyncShooting(player);
 
                 if (connectionState == ConnectionState.Hosting && (now - lastEnvironmentSync).TotalSeconds > 15)
@@ -324,6 +356,12 @@ namespace Real_Life_System
                 {
                     CheckDamageDealt();
                     lastDamageCheck = now;
+                }
+
+                if ((now - lastVehicleCleanup).TotalSeconds > 60)
+                {
+                    Task.Run(async () => await firebase.CleanupOldVehicles(mySessionId));
+                    lastVehicleCleanup = now;
                 }
 
                 UpdateRemotePlayers();
