@@ -35,11 +35,13 @@ namespace Real_Life_System
         DateTime lastSessionHealthCheck = DateTime.MinValue;
         DateTime lastFpsCheck = DateTime.UtcNow;
         float playerSpeed = 0f;
-        int adaptivePlayerSyncRate = 50;
-        int adaptiveVehicleSyncRate = 100;
+        int adaptivePlayerSyncRate = 100;
+        int adaptiveVehicleSyncRate = 150;
         int frameCount = 0;
         float currentFps = 0;
         bool isCurrentHost = false;
+        private bool wasShooting = false;
+        private Vector3 lastShootDir = Vector3.Zero;
 
         public CoopScript()
         {
@@ -60,8 +62,8 @@ namespace Real_Life_System
                 firebase.SetMyPlayerId(myPlayerId);
 
                 firebase.SetSyncRates(
-                    playerMs: 50,
-                    vehicleMs: 100,
+                    playerMs: 100,
+                    vehicleMs: 150,
                     environmentMs: 15000
                 );
 
@@ -260,22 +262,22 @@ namespace Real_Life_System
 
                 if (playerSpeed > 50f)
                 {
-                    adaptivePlayerSyncRate = 33;
-                    adaptiveVehicleSyncRate = 33;
+                    adaptivePlayerSyncRate = 50;
+                    adaptiveVehicleSyncRate = 75;
                 }
                 else if (playerSpeed > 20f)
                 {
-                    adaptivePlayerSyncRate = 50;
-                    adaptiveVehicleSyncRate = 50;
+                    adaptivePlayerSyncRate = 75;
+                    adaptiveVehicleSyncRate = 100;
                 }
                 else if (playerSpeed > 5f)
                 {
                     adaptivePlayerSyncRate = 100;
-                    adaptiveVehicleSyncRate = 100;
+                    adaptiveVehicleSyncRate = 150;
                 }
                 else
                 {
-                    adaptivePlayerSyncRate = 200;
+                    adaptivePlayerSyncRate = 150;
                     adaptiveVehicleSyncRate = 200;
                 }
 
@@ -296,6 +298,9 @@ namespace Real_Life_System
                         }
                     }
                 }
+
+                // NOVO: Sync de projéteis quando atira
+                DetectAndSyncShooting(player);
 
                 if (connectionState == ConnectionState.Hosting && (now - lastEnvironmentSync).TotalSeconds > 15)
                 {
@@ -331,6 +336,64 @@ namespace Real_Life_System
                 chatSystem.AddErrorMessage($"Tick: {ex.Message}");
             }
         }
+
+        private void DetectAndSyncShooting(Ped player)
+        {
+            try
+            {
+                bool isShooting = player.IsShooting;
+
+                if (isShooting && !wasShooting)
+                {
+                    var weapon = player.Weapons.Current;
+                    Vector3 muzzlePos = Function.Call<Vector3>(
+                        Hash.GET_PED_BONE_COORDS,
+                        player.Handle,
+                        (int)Bone.SkelRightHand,
+                        0.0f, 0.0f, 0.0f
+                    );
+                    var camRot = Function.Call<Vector3>(Hash.GET_GAMEPLAY_CAM_ROT, 2);
+                    var dir = RotationToDirection(camRot);
+
+                    lastShootDir = dir;
+
+                    Task.Run(async () =>
+                    {
+                        var shootData = new Dictionary<string, object>
+                        {
+                            { "PlayerId", myPlayerId },
+                            { "W", (int)weapon.Hash },
+                            { "X", (short)(muzzlePos.X * 10) },
+                            { "Y", (short)(muzzlePos.Y * 10) },
+                            { "Z", (short)(muzzlePos.Z * 10) },
+                            { "Dx", (sbyte)(dir.X * 100) },
+                            { "Dy", (sbyte)(dir.Y * 100) },
+                            { "Dz", (sbyte)(dir.Z * 100) },
+                            { "T", DateTimeOffset.UtcNow.ToUnixTimeSeconds() }
+                        };
+
+                        await firebase.SendShootEvent(mySessionId, myPlayerId, shootData);
+                    });
+                }
+
+                wasShooting = isShooting;
+            }
+            catch { }
+        }
+
+        private Vector3 RotationToDirection(Vector3 rotation)
+        {
+            float z = rotation.Z * 0.0174532924f;
+            float x = rotation.X * 0.0174532924f;
+            float num = Math.Abs((float)Math.Cos(x));
+
+            return new Vector3(
+                (float)(-Math.Sin(z) * num),
+                (float)(Math.Cos(z) * num),
+                (float)Math.Sin(x)
+            );
+        }
+
 
         async void SyncPlayer()
         {
@@ -554,7 +617,7 @@ namespace Real_Life_System
                     var player = kv.Value;
                     if (player.Ped == null || !player.Ped.Exists()) continue;
 
-                    float lerpFactor = playerSpeed > 20f ? 0.5f : 0.3f;
+                    float lerpFactor = 0.4f;
 
                     if (player.InVehicle && !string.IsNullOrEmpty(player.VehicleId))
                     {
@@ -617,7 +680,7 @@ namespace Real_Life_System
                     var vehicle = kv.Value;
                     if (vehicle.Vehicle == null || !vehicle.Vehicle.Exists()) continue;
 
-                    float lerpFactor = playerSpeed > 30f ? 0.6f : 0.4f;
+                    float lerpFactor = 0.5f;
 
                     vehicle.Vehicle.Position = Vector3.Lerp(vehicle.Vehicle.Position, vehicle.TargetPos, lerpFactor);
                     vehicle.Vehicle.Heading = Lerp(vehicle.Vehicle.Heading, vehicle.TargetHeading, lerpFactor);

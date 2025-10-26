@@ -24,8 +24,8 @@ namespace Real_Life_System
         private DateTime lastVehicleFetch = DateTime.MinValue;
         private DateTime lastEnvironmentFetch = DateTime.MinValue;
         private DateTime lastChatFetch = DateTime.MinValue;
-        private int playerFetchInterval = 50;
-        private int vehicleFetchInterval = 100;
+        private int playerFetchInterval = 100;
+        private int vehicleFetchInterval = 150;
         private int environmentFetchInterval = 10000;
         private readonly int chatFetchInterval = 500;
         private float interestRadius = 300f;
@@ -42,7 +42,7 @@ namespace Real_Life_System
         {
             firebase = new FirebaseClient(firebaseUrl);
             chatSystem = chat;
-            batchTimer = new Timer(_ => ProcessBatchUpdates(), null, 33, 33);
+            batchTimer = new Timer(_ => ProcessBatchUpdates(), null, 50, 50);
         }
 
         public void SetMyPlayerId(string playerId)
@@ -58,14 +58,13 @@ namespace Real_Life_System
             {
                 var timestamp = GetTimestamp();
 
-                chatSystem.AddSystemMessage($"[DEBUG] Criando sessão {currentSessionId}");
-                chatSystem.AddSystemMessage($"[DEBUG] Timestamp: {timestamp}");
+                chatSystem.AddSystemMessage($"[DEBUG] Criando {currentSessionId}");
 
                 var sessionData = new Dictionary<string, object>
                 {
                     { "hid", myPlayerId },
                     { "h", hostName },
-                    { "pl", 1 },
+                    { "p", 1 },
                     { "m", maxPlayers },
                     { "r", region },
                     { "c", timestamp },
@@ -80,6 +79,8 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
 
+                await Task.Delay(500);
+
                 var verify = await firebase
                     .Child("s")
                     .Child(currentSessionId)
@@ -90,24 +91,22 @@ namespace Real_Life_System
 
                 if (verify != null)
                 {
-                    chatSystem.AddSystemMessage($"[DEBUG] ✓ Sessão confirmada no Firebase");
-                    chatSystem.AddSystemMessage($"[DEBUG] Dados: {string.Join(", ", verify.Keys)}");
+                    chatSystem.AddSystemMessage($"[DEBUG] ✓ Confirmado");
                 }
                 else
                 {
-                    chatSystem.AddErrorMessage("[DEBUG] ✗ Sessão NÃO aparece no Firebase!");
+                    chatSystem.AddErrorMessage("[DEBUG] ✗ Falhou!");
                     return null;
                 }
 
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 5000);
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 3000, 3000);
 
-                chatSystem.AddSystemMessage($"✓ Sessão criada: {currentSessionId.Substring(0, 6)}");
+                chatSystem.AddSystemMessage($"✓ Sessão: {currentSessionId.Substring(0, 6)}");
                 return currentSessionId;
             }
             catch (Exception ex)
             {
-                chatSystem.AddErrorMessage($"[CREATE ERROR] {ex.Message}");
-                chatSystem.AddErrorMessage($"[CREATE STACK] {ex.StackTrace}");
+                chatSystem.AddErrorMessage($"[CREATE] {ex.Message}");
                 return null;
             }
         }
@@ -116,7 +115,7 @@ namespace Real_Life_System
         {
             try
             {
-                chatSystem.AddSystemMessage("[DEBUG] Iniciando busca...");
+                chatSystem.AddSystemMessage("[DEBUG] Buscando...");
 
                 var sessionsSnapshot = await firebase
                     .Child("s")
@@ -124,11 +123,10 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
 
-                chatSystem.AddSystemMessage($"[DEBUG] Firebase retornou {sessionsSnapshot.Count} chaves");
+                chatSystem.AddSystemMessage($"[DEBUG] {sessionsSnapshot.Count} no Firebase");
 
                 if (sessionsSnapshot.Count == 0)
                 {
-                    chatSystem.AddSystemMessage("[DEBUG] Nenhuma chave /s/ no Firebase");
                     return new List<SessionInfo>();
                 }
 
@@ -139,8 +137,6 @@ namespace Real_Life_System
                 {
                     try
                     {
-                        chatSystem.AddSystemMessage($"[DEBUG] Processando: {sessionSnapshot.Key}");
-
                         var infoData = await firebase
                             .Child("s")
                             .Child(sessionSnapshot.Key)
@@ -149,67 +145,42 @@ namespace Real_Life_System
 
                         TotalFirebaseCalls++;
 
-                        if (infoData == null)
-                        {
-                            chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: info é null");
-                            continue;
-                        }
-
-                        chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: Keys = {string.Join(", ", infoData.Keys)}");
+                        if (infoData == null) continue;
 
                         if (infoData.ContainsKey("hb"))
                         {
                             var heartbeat = Convert.ToInt64(infoData["hb"]);
                             var age = currentTime - heartbeat;
 
-                            chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: heartbeat há {age}s");
-
-                            if (age > 120)
-                            {
-                                chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: expirado");
-                                continue;
-                            }
-                        }
-                        else
-                        {
-                            chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: sem heartbeat!");
+                            if (age > 120) continue;
                         }
 
                         if (region != null && infoData.ContainsKey("r"))
                         {
                             var sessionRegion = infoData["r"].ToString();
-                            if (sessionRegion != region)
-                            {
-                                chatSystem.AddSystemMessage($"[DEBUG] {sessionSnapshot.Key}: região diferente ({sessionRegion} vs {region})");
-                                continue;
-                            }
+                            if (sessionRegion != region) continue;
                         }
 
                         var sessionInfo = new SessionInfo
                         {
                             SessionId = sessionSnapshot.Key,
                             HostName = infoData.ContainsKey("h") ? infoData["h"].ToString() : "Unknown",
-                            PlayerCount = infoData.ContainsKey("pl") ? Convert.ToInt32(infoData["pl"]) : 0,
+                            PlayerCount = infoData.ContainsKey("p") ? Convert.ToInt32(infoData["p"]) : 0,
                             MaxPlayers = infoData.ContainsKey("m") ? Convert.ToInt32(infoData["m"]) : 8,
                             Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
                         };
 
-                        chatSystem.AddSystemMessage($"[DEBUG] ✓ {sessionInfo.HostName} ({sessionInfo.PlayerCount}/{sessionInfo.MaxPlayers})");
                         result.Add(sessionInfo);
                     }
-                    catch (Exception ex)
-                    {
-                        chatSystem.AddErrorMessage($"[DEBUG] Erro em {sessionSnapshot.Key}: {ex.Message}");
-                    }
+                    catch { }
                 }
 
-                chatSystem.AddSystemMessage($"[RESULTADO] {result.Count} sessões válidas de {sessionsSnapshot.Count} totais");
+                chatSystem.AddSystemMessage($"[RESULTADO] {result.Count} sessões");
                 return result;
             }
             catch (Exception ex)
             {
-                chatSystem.AddErrorMessage($"[GETSESSIONS ERROR] {ex.Message}");
-                chatSystem.AddErrorMessage($"[GETSESSIONS STACK] {ex.StackTrace}");
+                chatSystem.AddErrorMessage($"[GET] {ex.Message}");
                 return new List<SessionInfo>();
             }
         }
@@ -220,8 +191,6 @@ namespace Real_Life_System
             {
                 currentSessionId = sessionId;
                 myPlayerId = playerId;
-
-                chatSystem.AddSystemMessage($"[DEBUG] Entrando na sessão {sessionId.Substring(0, 6)}...");
 
                 await firebase
                     .Child("s")
@@ -244,20 +213,19 @@ namespace Real_Life_System
                     .Child("s")
                     .Child(sessionId)
                     .Child("info")
-                    .Child("pl")
+                    .Child("p")
                     .PutAsync(players.Count);
 
                 TotalFirebaseCalls++;
 
-                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 5000, 5000);
+                heartbeatTimer = new Timer(async _ => await SendHeartbeat(), null, 3000, 3000);
 
-                chatSystem.AddSystemMessage($"[DEBUG] ✓ Conectado! {players.Count} jogadores");
+                chatSystem.AddSystemMessage($"✓ Conectado!");
                 return true;
             }
             catch (Exception ex)
             {
-                chatSystem.AddErrorMessage($"[JOIN ERROR] {ex.Message}");
-                chatSystem.AddErrorMessage($"[JOIN STACK] {ex.StackTrace}");
+                chatSystem.AddErrorMessage($"[JOIN] {ex.Message}");
                 return false;
             }
         }
@@ -292,7 +260,7 @@ namespace Real_Life_System
                 await firebase
                     .Child("s")
                     .Child(sessionId)
-                    .Child("pl")
+                    .Child("p")
                     .Child(playerId)
                     .DeleteAsync();
 
@@ -326,7 +294,7 @@ namespace Real_Life_System
                         {
                             { "hid", newHostKey },
                             { "h", newHostName },
-                            { "pl", remainingPlayers.Count }
+                            { "p", remainingPlayers.Count }
                         });
 
                     TotalFirebaseCalls++;
@@ -337,16 +305,13 @@ namespace Real_Life_System
                         .Child("s")
                         .Child(sessionId)
                         .Child("info")
-                        .Child("pl")
+                        .Child("p")
                         .PutAsync(remainingPlayers.Count);
 
                     TotalFirebaseCalls++;
                 }
             }
-            catch (Exception ex)
-            {
-                chatSystem?.AddErrorMessage($"[LEAVE ERROR] {ex.Message}");
-            }
+            catch { }
         }
 
         public async Task<bool> IsHost(string sessionId, string playerId)
@@ -388,10 +353,7 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
 
-                if (info == null)
-                {
-                    return;
-                }
+                if (info == null) return;
 
                 if (info.ContainsKey("hb"))
                 {
@@ -425,7 +387,6 @@ namespace Real_Life_System
                 if (players.Count == 0)
                 {
                     await DeleteSession(sessionId);
-                    chatSystem.AddSystemMessage("[DEBUG] Sessão deletada (sem players)");
                     return;
                 }
 
@@ -448,10 +409,7 @@ namespace Real_Life_System
 
                 TotalFirebaseCalls++;
             }
-            catch
-            {
-                // Silently fail
-            }
+            catch { }
         }
 
         public async Task DeleteSession(string sessionId)
@@ -459,9 +417,6 @@ namespace Real_Life_System
             try
             {
                 heartbeatTimer?.Dispose();
-                batchTimer?.Dispose();
-
-                chatSystem.AddSystemMessage($"[DEBUG] Deletando sessão {sessionId}");
 
                 await firebase
                     .Child("s")
@@ -469,31 +424,21 @@ namespace Real_Life_System
                     .DeleteAsync();
 
                 TotalFirebaseCalls++;
-                chatSystem.AddSystemMessage("[DEBUG] ✓ Sessão deletada");
             }
-            catch (Exception ex)
-            {
-                chatSystem.AddErrorMessage($"[DELETE ERROR] {ex.Message}");
-            }
+            catch { }
         }
 
         public async Task CleanupExpiredSessions()
         {
             try
             {
-                chatSystem.AddSystemMessage("[DEBUG] Iniciando limpeza...");
-
                 var sessions = await firebase
                     .Child("s")
                     .OnceAsync<object>();
 
                 TotalFirebaseCalls++;
 
-                if (sessions.Count == 0)
-                {
-                    chatSystem.AddSystemMessage("[DEBUG] Nenhuma sessão para limpar");
-                    return;
-                }
+                if (sessions.Count == 0) return;
 
                 var currentTime = GetTimestamp();
                 int deletedCount = 0;
@@ -512,7 +457,6 @@ namespace Real_Life_System
 
                         if (info == null)
                         {
-                            chatSystem.AddSystemMessage($"[DEBUG] {session.Key}: info null, deletando");
                             await firebase
                                 .Child("s")
                                 .Child(session.Key)
@@ -528,8 +472,6 @@ namespace Real_Life_System
                             var heartbeat = Convert.ToInt64(info["hb"]);
                             var age = currentTime - heartbeat;
 
-                            chatSystem.AddSystemMessage($"[DEBUG] {session.Key}: heartbeat há {age}s");
-
                             if (age > 120)
                             {
                                 var players = await firebase
@@ -542,7 +484,6 @@ namespace Real_Life_System
 
                                 if (players.Count == 0)
                                 {
-                                    chatSystem.AddSystemMessage($"[DEBUG] {session.Key}: expirado e vazio, deletando");
                                     await firebase
                                         .Child("s")
                                         .Child(session.Key)
@@ -551,54 +492,18 @@ namespace Real_Life_System
                                     TotalFirebaseCalls++;
                                     deletedCount++;
                                 }
-                                else
-                                {
-                                    chatSystem.AddSystemMessage($"[DEBUG] {session.Key}: migrando host");
-                                    var newHostKey = players.First().Key;
-                                    var newHostData = players.First().Object as Dictionary<string, object>;
-                                    string newHostName = newHostData != null && newHostData.ContainsKey("n")
-                                        ? newHostData["n"].ToString()
-                                        : "Unknown";
-
-                                    await firebase
-                                        .Child("s")
-                                        .Child(session.Key)
-                                        .Child("info")
-                                        .PatchAsync(new Dictionary<string, object>
-                                        {
-                                            { "hid", newHostKey },
-                                            { "h", newHostName },
-                                            { "hb", currentTime }
-                                        });
-
-                                    TotalFirebaseCalls++;
-                                }
                             }
                         }
-                        else
-                        {
-                            chatSystem.AddSystemMessage($"[DEBUG] {session.Key}: sem heartbeat, deletando");
-                            await firebase
-                                .Child("s")
-                                .Child(session.Key)
-                                .DeleteAsync();
-
-                            TotalFirebaseCalls++;
-                            deletedCount++;
-                        }
                     }
-                    catch (Exception ex)
-                    {
-                        chatSystem.AddErrorMessage($"[DEBUG] Erro em {session.Key}: {ex.Message}");
-                    }
+                    catch { }
                 }
 
-                chatSystem.AddSystemMessage($"[DEBUG] ✓ {deletedCount} sessões limpas");
+                if (deletedCount > 0)
+                {
+                    chatSystem?.AddSystemMessage($"✓ {deletedCount} limpas");
+                }
             }
-            catch (Exception ex)
-            {
-                chatSystem.AddErrorMessage($"[CLEANUP ERROR] {ex.Message}");
-            }
+            catch { }
         }
 
         private async Task SendHeartbeat()
@@ -617,22 +522,12 @@ namespace Real_Life_System
                     .PutAsync(timestamp);
 
                 TotalFirebaseCalls++;
-                Console.WriteLine($"[HEARTBEAT] {currentSessionId}: {timestamp}");
             }
-            catch (Exception ex)
-            {
-                chatSystem.AddErrorMessage($"[HEARTBEAT ERROR] {ex.Message}");
-            }
+            catch { }
         }
 
         public async Task UpdatePlayerData(string sessionId, string playerId, PlayerData data)
         {
-            if (playerId == myPlayerId)
-            {
-                SelfSyncBlocked++;
-                return;
-            }
-
             try
             {
                 if (lastSentPlayerData.ContainsKey(playerId))
@@ -645,11 +540,7 @@ namespace Real_Life_System
                         Math.Pow(data.PosZ - lastData.PosZ, 2)
                     );
 
-                    float deltaHeading = Math.Abs(data.Heading - lastData.Heading);
-
-                    if (deltaPos < 0.2f && deltaHeading < 3f &&
-                        data.Animation == lastData.Animation &&
-                        data.InVehicle == lastData.InVehicle)
+                    if (deltaPos < 0.15f && data.Animation == lastData.Animation)
                     {
                         CachedResponses++;
                         return;
@@ -679,11 +570,15 @@ namespace Real_Life_System
                     compressedData["seat"] = (sbyte)data.VehicleSeat;
                 }
 
-                pendingUpdates.Enqueue(new PendingUpdate
-                {
-                    Path = $"s/{sessionId}/pl/{playerId}",
-                    Data = compressedData
-                });
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("p")
+                    .Child(playerId)
+                    .PutAsync(compressedData);
+
+                TotalFirebaseCalls++;
+                TotalBytesSent += EstimateDataSize(compressedData);
 
                 lastSentPlayerData[playerId] = data;
                 playersCache[playerId] = data;
@@ -706,7 +601,7 @@ namespace Real_Life_System
                 var players = await firebase
                     .Child("s")
                     .Child(sessionId)
-                    .Child("pl")
+                    .Child("p")
                     .OnceAsync<Dictionary<string, object>>();
 
                 TotalFirebaseCalls++;
@@ -795,7 +690,7 @@ namespace Real_Life_System
                         Math.Pow(data.PosZ - lastData.PosZ, 2)
                     );
 
-                    if (deltaPos < 0.3f && data.EngineRunning == lastData.EngineRunning)
+                    if (deltaPos < 0.25f)
                     {
                         CachedResponses++;
                         return;
@@ -818,11 +713,15 @@ namespace Real_Life_System
                     { "t", GetTimestamp() }
                 };
 
-                pendingUpdates.Enqueue(new PendingUpdate
-                {
-                    Path = $"s/{sessionId}/v/{ownedVehicleId}",
-                    Data = compressedData
-                });
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("v")
+                    .Child(ownedVehicleId)
+                    .PutAsync(compressedData);
+
+                TotalFirebaseCalls++;
+                TotalBytesSent += EstimateDataSize(compressedData);
 
                 lastSentVehicleData[ownedVehicleId] = data;
                 vehiclesCache[ownedVehicleId] = data;
@@ -1007,9 +906,8 @@ namespace Real_Life_System
                 TotalFirebaseCalls++;
                 return messageId;
             }
-            catch (Exception ex)
+            catch
             {
-                chatSystem.AddErrorMessage($"[CHAT ERROR] {ex.Message}");
                 return null;
             }
         }
@@ -1079,12 +977,45 @@ namespace Real_Life_System
                 await firebase
                     .Child("s")
                     .Child(sessionId)
-                    .Child("pl")
+                    .Child("p")
                     .Child(targetPlayerId)
                     .Child("dmg")
                     .PutAsync(damageData);
 
                 TotalFirebaseCalls++;
+            }
+            catch { }
+        }
+
+        public async Task SendShootEvent(string sessionId, string playerId, Dictionary<string, object> shootData)
+        {
+            try
+            {
+                var shootId = GenerateCompactId();
+
+                await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("shots")
+                    .Child(shootId)
+                    .PutAsync(shootData);
+
+                TotalFirebaseCalls++;
+
+                _ = Task.Run(async () =>
+                {
+                    await Task.Delay(2000);
+                    try
+                    {
+                        await firebase
+                            .Child("s")
+                            .Child(sessionId)
+                            .Child("shots")
+                            .Child(shootId)
+                            .DeleteAsync();
+                    }
+                    catch { }
+                });
             }
             catch { }
         }
