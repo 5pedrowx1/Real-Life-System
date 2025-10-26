@@ -38,9 +38,10 @@ namespace Real_Life_System
         private readonly Queue<PendingUpdate> pendingUpdates = new Queue<PendingUpdate>();
         private readonly Timer batchTimer;
 
-        public FirebaseRelay(string firebaseUrl)
+        public FirebaseRelay(string firebaseUrl, ChatSystem chat)
         {
             firebase = new FirebaseClient(firebaseUrl);
+            chatSystem = chat;
             batchTimer = new Timer(_ => ProcessBatchUpdates(), null, 33, 33);
         }
 

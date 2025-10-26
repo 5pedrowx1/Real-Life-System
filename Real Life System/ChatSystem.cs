@@ -16,6 +16,7 @@ namespace Real_Life_System
         private bool isActive = false;
         private DateTime lastInputTime = DateTime.MinValue;
         private const int MAX_MESSAGES = 8;
+        private const int MAX_STORED_MESSAGES = 100;
         private const int MAX_INPUT_LENGTH = 100;
         private const float MESSAGE_LIFETIME = 10f;
         private const float FADE_START = 8f;
@@ -27,9 +28,12 @@ namespace Real_Life_System
         private readonly Color inputBackgroundColor = Color.FromArgb(0, 0, 0, 0);
         private readonly Color textColor = Color.White;
         private readonly Color inputTextColor = Color.FromArgb(255, 255, 255, 255);
-        private readonly Color playerNameColor = Color.FromArgb(255, 100, 200, 255); 
-        private readonly Color systemMessageColor = Color.FromArgb(255, 255, 200, 100); 
+        private readonly Color playerNameColor = Color.FromArgb(255, 100, 200, 255);
+        private readonly Color systemMessageColor = Color.FromArgb(255, 255, 200, 100);
         private readonly Color errorColor = Color.FromArgb(255, 255, 100, 100);
+        private int scrollOffset = 0;
+        private int maxScrollOffset = 0;
+
         public bool IsActive => isActive;
         public string CurrentInput => currentInput;
 
@@ -52,13 +56,13 @@ namespace Real_Life_System
                     displayMsg.CustomColor = errorColor;
                     break;
                 case ChatMessageType.Me:
-                    displayMsg.CustomColor = Color.FromArgb(255, 200, 150, 255); 
+                    displayMsg.CustomColor = Color.FromArgb(255, 200, 150, 255);
                     break;
                 case ChatMessageType.Do:
-                    displayMsg.CustomColor = Color.FromArgb(255, 150, 255, 150); 
+                    displayMsg.CustomColor = Color.FromArgb(255, 150, 255, 150);
                     break;
                 case ChatMessageType.Private:
-                    displayMsg.CustomColor = Color.FromArgb(255, 255, 255, 100); 
+                    displayMsg.CustomColor = Color.FromArgb(255, 255, 255, 100);
                     break;
                 default:
                     displayMsg.CustomColor = textColor;
@@ -67,12 +71,12 @@ namespace Real_Life_System
 
             displayMessages.Add(displayMsg);
 
-            while (displayMessages.Count > MAX_MESSAGES)
+            while (displayMessages.Count > MAX_STORED_MESSAGES)
             {
                 displayMessages.RemoveAt(0);
             }
 
-            if (type != ChatMessageType.System)
+            if (scrollOffset == 0 && type != ChatMessageType.System)
             {
                 GTA.Audio.PlaySoundFrontendAndForget("CHAT_MESSAGE", "HUD_FRONTEND_DEFAULT_SOUNDSET");
             }
@@ -92,13 +96,40 @@ namespace Real_Life_System
         {
             isActive = true;
             currentInput = "";
+            scrollOffset = 0;
             lastInputTime = DateTime.UtcNow;
+            DisableGameControls();
         }
 
         public void Deactivate()
         {
             isActive = false;
             currentInput = "";
+            scrollOffset = 0;
+        }
+
+        public void ScrollUp()
+        {
+            if (!isActive) return;
+
+            maxScrollOffset = Math.Max(0, displayMessages.Count - MAX_MESSAGES);
+
+            if (scrollOffset < maxScrollOffset)
+            {
+                scrollOffset++;
+                GTA.Audio.PlaySoundFrontendAndForget("NAV_UP_DOWN", "HUD_FRONTEND_DEFAULT_SOUNDSET");
+            }
+        }
+
+        public void ScrollDown()
+        {
+            if (!isActive) return;
+
+            if (scrollOffset > 0)
+            {
+                scrollOffset--;
+                GTA.Audio.PlaySoundFrontendAndForget("NAV_UP_DOWN", "HUD_FRONTEND_DEFAULT_SOUNDSET");
+            }
         }
 
         public void AddCharacter(char c)
@@ -145,25 +176,84 @@ namespace Real_Life_System
             }
         }
 
+        private void DisableGameControls()
+        {
+            if (!isActive) return;
+
+            Game.DisableControlThisFrame(Control.FrontendPause);
+            Game.DisableControlThisFrame(Control.FrontendPauseAlternate);
+            Game.DisableControlThisFrame(Control.SelectCharacterMichael);
+            Game.DisableControlThisFrame(Control.SelectCharacterFranklin);
+            Game.DisableControlThisFrame(Control.SelectCharacterTrevor);
+            Game.DisableControlThisFrame(Control.SelectCharacterMultiplayer);
+            Game.DisableControlThisFrame(Control.Phone);
+            Game.DisableControlThisFrame(Control.CharacterWheel);
+            Game.DisableControlThisFrame(Control.MultiplayerInfo);
+            Game.DisableControlThisFrame(Control.Sprint);
+            Game.DisableControlThisFrame(Control.Jump);
+            Game.DisableControlThisFrame(Control.Enter);
+            Game.DisableControlThisFrame(Control.Attack);
+            Game.DisableControlThisFrame(Control.Attack2);
+            Game.DisableControlThisFrame(Control.Aim);
+            Game.DisableControlThisFrame(Control.LookBehind);
+            Game.DisableControlThisFrame(Control.VehicleExit);
+            Game.DisableControlThisFrame(Control.VehicleHandbrake);
+            Game.DisableControlThisFrame(Control.VehicleAccelerate);
+            Game.DisableControlThisFrame(Control.VehicleBrake);
+            Game.DisableControlThisFrame(Control.Duck);
+            Game.DisableControlThisFrame(Control.SelectWeapon);
+            Game.DisableControlThisFrame(Control.VehicleRadioWheel);
+            Game.DisableControlThisFrame(Control.VehicleCinCam);
+            Game.DisableControlThisFrame(Control.MeleeAttackLight);
+            Game.DisableControlThisFrame(Control.MeleeAttackHeavy);
+            Game.DisableControlThisFrame(Control.SpecialAbility);
+            Game.DisableControlThisFrame(Control.SpecialAbilityPC);
+            Game.DisableControlThisFrame(Control.SpecialAbilitySecondary);
+        }
+
         public void Draw()
         {
             try
             {
+                if (isActive)
+                {
+                    DisableGameControls();
+                }
+
                 var now = DateTime.UtcNow;
 
-                displayMessages.RemoveAll(m => (now - m.ReceivedTime).TotalSeconds > MESSAGE_LIFETIME);
+                if (!isActive)
+                {
+                    displayMessages.RemoveAll(m => (now - m.ReceivedTime).TotalSeconds > MESSAGE_LIFETIME);
+                }
 
-                int visibleCount = Math.Min(displayMessages.Count, MAX_MESSAGES);
+                int totalMessages = displayMessages.Count;
+                int visibleCount = Math.Min(totalMessages, MAX_MESSAGES);
                 float currentY = BASE_Y;
 
                 if (isActive)
                 {
                     DrawInputBox(currentY);
                     currentY -= INPUT_Y_OFFSET;
+
+                    if (totalMessages > MAX_MESSAGES)
+                    {
+                        DrawScrollIndicator(totalMessages, scrollOffset);
+                    }
                 }
 
-                for (int i = displayMessages.Count - 1; i >= Math.Max(0, displayMessages.Count - visibleCount); i--)
+                int startIndex = isActive
+                    ? Math.Max(0, totalMessages - MAX_MESSAGES - scrollOffset)
+                    : Math.Max(0, totalMessages - visibleCount);
+
+                int endIndex = isActive
+                    ? Math.Max(0, totalMessages - scrollOffset)
+                    : totalMessages;
+
+                for (int i = endIndex - 1; i >= startIndex; i--)
                 {
+                    if (i < 0 || i >= displayMessages.Count) continue;
+
                     var msg = displayMessages[i];
                     float age = (float)(now - msg.ReceivedTime).TotalSeconds;
                     int alpha = 255;
@@ -187,6 +277,23 @@ namespace Real_Life_System
             catch
             {
                 // Silently fail
+            }
+        }
+
+        private void DrawScrollIndicator(int totalMessages, int currentOffset)
+        {
+            float indicatorX = BASE_X + 0.36f;
+            float indicatorY = BASE_Y - (MAX_MESSAGES * LINE_HEIGHT / 2);
+
+            string scrollText = $"↑ {currentOffset}/{Math.Max(0, totalMessages - MAX_MESSAGES)} ↓";
+            Color indicatorColor = Color.FromArgb(200, 150, 150, 150);
+
+            DrawText(scrollText, indicatorX, indicatorY, 0.08f, indicatorColor);
+
+            if (scrollOffset > 0 || totalMessages > MAX_MESSAGES)
+            {
+                DrawText("↑/↓ para scroll", BASE_X, BASE_Y + 0.035f, 0.25f,
+                    Color.FromArgb(150, 255, 255, 100));
             }
         }
 
@@ -279,12 +386,12 @@ namespace Real_Life_System
             var textElement = new TextElement(
                 text,
                 new PointF(x * GTA.UI.Screen.Width, y * GTA.UI.Screen.Height),
-                0.35f, 
+                0.35f,
                 color,
-                GTA.UI.Font.ChaletLondon, 
+                GTA.UI.Font.ChaletLondon,
                 GTA.UI.Alignment.Left,
-                false, 
-                true,  
+                false,
+                true,
                 (int)(maxWidth * GTA.UI.Screen.Width)
             );
 
@@ -338,6 +445,7 @@ namespace Real_Life_System
                 AddSystemMessage("/do [descrição] - Descrição RP");
                 AddSystemMessage("/pm [player] [msg] - Mensagem privada");
                 AddSystemMessage("/clear - Limpar chat");
+                AddSystemMessage("↑/↓ - Scroll no chat");
                 return null;
             }
             else

@@ -52,8 +52,8 @@ namespace Real_Life_System
                 Aborted += OnAborted;
 
                 string firebaseUrl = "https://gta-coop-mod-default-rtdb.europe-west1.firebasedatabase.app/";
-                firebase = new FirebaseRelay(firebaseUrl);
                 chatSystem = new ChatSystem();
+                firebase = new FirebaseRelay(firebaseUrl, chatSystem);
 
                 firebase.SetMyPlayerId(myPlayerId);
 
@@ -765,6 +765,19 @@ namespace Real_Life_System
             {
                 if (chatSystem.IsActive)
                 {
+                    if (e.KeyCode == Keys.Up)
+                    {
+                        chatSystem.ScrollUp();
+                        e.SuppressKeyPress = true;
+                        return;
+                    }
+                    else if (e.KeyCode == Keys.Down)
+                    {
+                        chatSystem.ScrollDown();
+                        e.SuppressKeyPress = true;
+                        return;
+                    }
+
                     if (e.KeyCode == Keys.Enter)
                     {
                         string input = chatSystem.GetInputAndClear();
