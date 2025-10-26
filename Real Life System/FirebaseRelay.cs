@@ -81,6 +81,60 @@ namespace Real_Life_System
             }
         }
 
+        private async Task<SessionInfo> ProcessSession(string sessionId, string region, long currentTime)
+        {
+            try
+            {
+                var infoData = await firebase
+                    .Child("s")
+                    .Child(sessionId)
+                    .Child("info")
+                    .OnceSingleAsync<Dictionary<string, object>>();
+
+                TotalFirebaseCalls++;
+
+                if (infoData == null)
+                {
+                    return null;
+                }
+
+                if (infoData.ContainsKey("hb"))
+                {
+                    var heartbeat = Convert.ToInt64(infoData["hb"]);
+                    if (currentTime - heartbeat > 30)
+                    {
+                        return null;
+                    }
+                }
+                else
+                {
+                    return null;
+                }
+
+                if (region != null && infoData.ContainsKey("r"))
+                {
+                    if (infoData["r"].ToString() != region)
+                    {
+                        return null;
+                    }
+                }
+
+                return new SessionInfo
+                {
+                    SessionId = sessionId,
+                    HostName = infoData.ContainsKey("h") ? infoData["h"].ToString() : "Unknown",
+                    PlayerCount = infoData.ContainsKey("p") ? Convert.ToInt32(infoData["p"]) : 0,
+                    MaxPlayers = infoData.ContainsKey("m") ? Convert.ToInt32(infoData["m"]) : 8,
+                    Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
+                };
+            }
+            catch (Exception ex)
+            {
+                GTA.UI.Notification.PostTicker($"[FB] ProcessSession {sessionId}: {ex.Message}", true);
+                return null;
+            }
+        }
+
         public async Task<List<SessionInfo>> GetAvailableSessions(string region = null)
         {
             try
@@ -93,46 +147,20 @@ namespace Real_Life_System
 
                 var currentTime = GetTimestamp();
                 var result = new List<SessionInfo>();
+                var tasks = new List<Task<SessionInfo>>();
 
                 foreach (var session in sessions)
                 {
-                    try
+                    tasks.Add(ProcessSession(session.Key, region, currentTime));
+                }
+
+                var sessionInfos = await Task.WhenAll(tasks);
+
+                foreach (var info in sessionInfos)
+                {
+                    if (info != null)
                     {
-                        var infoData = await firebase
-                            .Child("s")
-                            .Child(session.Key)
-                            .Child("info")
-                            .OnceSingleAsync<Dictionary<string, object>>();
-
-                        TotalFirebaseCalls++;
-
-                        if (infoData == null) continue;
-
-                        if (infoData.ContainsKey("hb"))
-                        {
-                            var heartbeat = Convert.ToInt64(infoData["hb"]);
-                            if (currentTime - heartbeat > 30) continue;
-                        }
-
-                        if (region != null && infoData.ContainsKey("r"))
-                        {
-                            if (infoData["r"].ToString() != region) continue;
-                        }
-
-                        var sessionInfo = new SessionInfo
-                        {
-                            SessionId = session.Key,
-                            HostName = infoData.ContainsKey("h") ? infoData["h"].ToString() : "Unknown",
-                            PlayerCount = infoData.ContainsKey("p") ? Convert.ToInt32(infoData["p"]) : 0,
-                            MaxPlayers = infoData.ContainsKey("m") ? Convert.ToInt32(infoData["m"]) : 8,
-                            Region = infoData.ContainsKey("r") ? infoData["r"].ToString() : "?"
-                        };
-
-                        result.Add(sessionInfo);
-                    }
-                    catch
-                    {
-                        continue;
+                        result.Add(info);
                     }
                 }
 
@@ -140,7 +168,7 @@ namespace Real_Life_System
             }
             catch (Exception ex)
             {
-                GTA.UI.Notification.PostTicker($"[FB] {ex.Message}", true);
+                GTA.UI.Notification.PostTicker($"[FB] GetSessions: {ex.Message}", true);
                 return new List<SessionInfo>();
             }
         }

@@ -132,7 +132,11 @@ namespace Real_Life_System
         {
             try
             {
+                chatSystem.AddSystemMessage("Buscando sessões...");
+
                 cachedSessions = await firebase.GetAvailableSessions(myRegion);
+
+                chatSystem.AddSystemMessage($"Encontradas: {cachedSessions.Count} sessões");
 
                 if (cachedSessions.Count == 0)
                 {
@@ -762,7 +766,6 @@ namespace Real_Life_System
         {
             try
             {
-                // Chat está ativo - capturar input
                 if (chatSystem.IsActive)
                 {
                     if (e.KeyCode == Keys.Enter)
